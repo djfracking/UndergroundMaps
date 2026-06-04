@@ -1,6 +1,27 @@
 import "./styles.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import {
+  Box as BoxIcon,
+  Circle,
+  Download,
+  FileImage,
+  FileJson,
+  Import as ImportIcon,
+  Map as MapIcon,
+  MousePointer2,
+  Orbit,
+  Pentagon,
+  Redo2,
+  Slash,
+  Square,
+  Stamp,
+  Trash2,
+  Type as TypeIcon,
+  Undo2,
+  createElement
+} from "lucide";
+import type { IconNode } from "lucide";
 
 type FeatureKind = "surface" | "underground" | "road" | "fence" | "entrance" | "label";
 type Certainty = "confirmed" | "inferred" | "speculative";
@@ -29,8 +50,49 @@ type ImagerySource = {
   referenceOnly: boolean;
 };
 
+type HistorySnapshot = {
+  features: Feature[];
+  selectedId: string;
+};
+
 const image = { width: 2709, height: 2320 };
 const worldScale = 0.18;
+const initialZoom = 0.38;
+
+const toolShortcuts: Record<Tool, string> = {
+  select: "V",
+  place: "B",
+  rect: "M",
+  ellipse: "O",
+  line: "L",
+  polygon: "P",
+  label: "T"
+};
+
+const viewShortcuts: Record<ViewMode, string> = {
+  plan: "1",
+  model: "2"
+};
+
+const iconNodes: Record<string, IconNode> = {
+  "3d": BoxIcon,
+  circle: Circle,
+  download: Download,
+  "file-image": FileImage,
+  "file-json": FileJson,
+  import: ImportIcon,
+  line: Slash,
+  map: MapIcon,
+  orbit: Orbit,
+  polygon: Pentagon,
+  redo: Redo2,
+  select: MousePointer2,
+  square: Square,
+  stamp: Stamp,
+  text: TypeIcon,
+  trash: Trash2,
+  undo: Undo2
+};
 
 const placementDefaults: Record<PlacementPreset, { kind: FeatureKind; label: string; width: number; length: number; height: number; depth: number }> = {
   surface: { kind: "surface", label: "Surface building", width: 260, length: 150, height: 34, depth: 0 },
@@ -49,7 +111,7 @@ let draft: Point[] = [];
 let pointerStart: Point | null = null;
 let referenceOpacity = 0.48;
 let showReference = true;
-let zoom = 0.38;
+let zoom = initialZoom;
 let pan = { x: 0, y: 0 };
 let referenceDataUrl = "";
 let terrainTexture: THREE.Texture | null = null;
@@ -66,7 +128,10 @@ let activeTransform: null | {
   initialRotation: number;
   center: Point;
   startAngle: number;
+  historyPushed: boolean;
 } = null;
+let undoStack: HistorySnapshot[] = [];
+let redoStack: HistorySnapshot[] = [];
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
@@ -79,11 +144,13 @@ app.innerHTML = `
         <p>Natanz reconstruction workspace</p>
       </div>
       <div class="actions">
-        <button id="exportJson">Export JSON</button>
-        <button id="importJson">Import JSON</button>
-        <button id="exportSvg">Export SVG</button>
-        <button id="exportPng">Export PNG</button>
-        <button id="exportModelPng">Export 3D PNG</button>
+        <button id="undoEdit" class="iconText" title="Undo (Cmd/Ctrl+Z)"><span data-icon="undo"></span><span>Undo</span></button>
+        <button id="redoEdit" class="iconText" title="Redo (Cmd/Ctrl+Shift+Z)"><span data-icon="redo"></span><span>Redo</span></button>
+        <button id="exportJson" class="iconText"><span data-icon="file-json"></span><span>Export JSON</span></button>
+        <button id="importJson" class="iconText"><span data-icon="import"></span><span>Import JSON</span></button>
+        <button id="exportSvg" class="iconText"><span data-icon="download"></span><span>Export SVG</span></button>
+        <button id="exportPng" class="iconText"><span data-icon="file-image"></span><span>Export PNG</span></button>
+        <button id="exportModelPng" class="iconText"><span data-icon="3d"></span><span>Export 3D PNG</span></button>
       </div>
     </header>
 
@@ -92,21 +159,57 @@ app.innerHTML = `
         <div class="group">
           <label>View</label>
           <div class="segmented" id="viewButtons">
-            <button data-view="plan">Plan</button>
-            <button data-view="model">3D Orbit</button>
+            <button data-view="plan" title="Plan view (1)" aria-keyshortcuts="${viewShortcuts.plan}">
+              <span data-icon="map"></span>
+              <span>Plan</span>
+              <kbd>${viewShortcuts.plan}</kbd>
+            </button>
+            <button data-view="model" title="3D orbit view (2)" aria-keyshortcuts="${viewShortcuts.model}">
+              <span data-icon="orbit"></span>
+              <span>3D Orbit</span>
+              <kbd>${viewShortcuts.model}</kbd>
+            </button>
           </div>
         </div>
 
         <div class="group">
           <label>Tool</label>
           <div class="segmented" id="toolButtons">
-            <button data-tool="select">Select</button>
-            <button data-tool="place">Place</button>
-            <button data-tool="rect">Box</button>
-            <button data-tool="ellipse">Oval</button>
-            <button data-tool="line">Line</button>
-            <button data-tool="polygon">Poly</button>
-            <button data-tool="label">Text</button>
+            <button data-tool="select" title="Select tool (V)" aria-keyshortcuts="${toolShortcuts.select}">
+              <span data-icon="select"></span>
+              <span>Select</span>
+              <kbd>${toolShortcuts.select}</kbd>
+            </button>
+            <button data-tool="place" title="Place building stamp (B)" aria-keyshortcuts="${toolShortcuts.place}">
+              <span data-icon="stamp"></span>
+              <span>Place</span>
+              <kbd>${toolShortcuts.place}</kbd>
+            </button>
+            <button data-tool="rect" title="Box marquee (M)" aria-keyshortcuts="${toolShortcuts.rect}">
+              <span data-icon="square"></span>
+              <span>Box</span>
+              <kbd>${toolShortcuts.rect}</kbd>
+            </button>
+            <button data-tool="ellipse" title="Oval shape (O)" aria-keyshortcuts="${toolShortcuts.ellipse}">
+              <span data-icon="circle"></span>
+              <span>Oval</span>
+              <kbd>${toolShortcuts.ellipse}</kbd>
+            </button>
+            <button data-tool="line" title="Line tool (L)" aria-keyshortcuts="${toolShortcuts.line}">
+              <span data-icon="line"></span>
+              <span>Line</span>
+              <kbd>${toolShortcuts.line}</kbd>
+            </button>
+            <button data-tool="polygon" title="Polygon pen (P)" aria-keyshortcuts="${toolShortcuts.polygon}">
+              <span data-icon="polygon"></span>
+              <span>Poly</span>
+              <kbd>${toolShortcuts.polygon}</kbd>
+            </button>
+            <button data-tool="label" title="Text tool (T)" aria-keyshortcuts="${toolShortcuts.label}">
+              <span data-icon="text"></span>
+              <span>Text</span>
+              <kbd>${toolShortcuts.label}</kbd>
+            </button>
           </div>
         </div>
 
@@ -203,7 +306,11 @@ app.innerHTML = `
             <button data-nudge="0,5">Down</button>
           </div>
           <textarea id="noteInput" placeholder="Evidence notes and citations"></textarea>
-          <button id="deleteFeature">Delete</button>
+          <button id="deleteFeature" class="iconText danger" title="Delete selected feature (Delete/Backspace)">
+            <span data-icon="trash"></span>
+            <span>Delete</span>
+            <kbd>Del</kbd>
+          </button>
         </div>
       </aside>
 
@@ -298,18 +405,13 @@ function bind() {
   document.querySelector("#viewButtons")!.addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
     if (!button) return;
-    viewMode = button.dataset.view as ViewMode;
-    render();
-    resizeModel();
+    setViewMode(button.dataset.view as ViewMode);
   });
 
   document.querySelector("#toolButtons")!.addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-tool]");
     if (!button) return;
-    tool = button.dataset.tool as Tool;
-    draft = [];
-    if (tool === "place") viewMode = "plan";
-    render();
+    setTool(button.dataset.tool as Tool);
   });
 
   document.querySelector<HTMLSelectElement>("#placementPreset")!.addEventListener("change", (event) => {
@@ -339,14 +441,12 @@ function bind() {
 
   document.querySelectorAll<HTMLButtonElement>("[data-rotate-stamp]").forEach((button) => {
     button.addEventListener("click", () => {
-      placementRotation = normalizeDegrees(placementRotation + Number(button.dataset.rotateStamp));
-      render();
+      rotatePlacementStamp(Number(button.dataset.rotateStamp));
     });
   });
 
   document.querySelector("#rotateStamp90")!.addEventListener("click", () => {
-    placementRotation = normalizeDegrees(placementRotation + 90);
-    render();
+    rotatePlacementStamp(90);
   });
 
   document.querySelector("#resetStampRotation")!.addEventListener("click", () => {
@@ -444,12 +544,7 @@ function bind() {
 
   document.querySelector("#loadImageryUrl")!.addEventListener("click", loadImageryUrl);
 
-  document.querySelector("#deleteFeature")!.addEventListener("click", () => {
-    features = features.filter((feature) => feature.id !== selectedId);
-    selectedId = features[0]?.id ?? "";
-    saveState();
-    render();
-  });
+  document.querySelector("#deleteFeature")!.addEventListener("click", deleteSelectedFeature);
 
   document.querySelector("#seedNatanz")!.addEventListener("click", seedNatanzLayout);
 
@@ -463,13 +558,225 @@ function bind() {
   });
   stage.addEventListener("dblclick", finishPolygon);
   window.addEventListener("resize", resizeModel);
+  window.addEventListener("keydown", handleHotkeys);
 
+  document.querySelector("#undoEdit")!.addEventListener("click", undoEdit);
+  document.querySelector("#redoEdit")!.addEventListener("click", redoEdit);
   document.querySelector("#exportJson")!.addEventListener("click", exportJson);
   document.querySelector("#exportSvg")!.addEventListener("click", exportSvg);
   document.querySelector("#exportPng")!.addEventListener("click", exportPng);
   document.querySelector("#exportModelPng")!.addEventListener("click", exportModelPng);
   document.querySelector("#importJson")!.addEventListener("click", () => document.querySelector<HTMLInputElement>("#fileImport")!.click());
   document.querySelector<HTMLInputElement>("#fileImport")!.addEventListener("change", importJson);
+}
+
+function setTool(nextTool: Tool) {
+  tool = nextTool;
+  draft = [];
+  pointerStart = null;
+  activeTransform = null;
+  if (tool === "place") viewMode = "plan";
+  render();
+  if (viewMode === "model") resizeModel();
+}
+
+function setViewMode(nextViewMode: ViewMode) {
+  viewMode = nextViewMode;
+  draft = [];
+  pointerStart = null;
+  activeTransform = null;
+  render();
+  resizeModel();
+}
+
+function setPlacementPreset(nextPreset: PlacementPreset) {
+  placementPreset = nextPreset;
+  const preset = placementDefaults[placementPreset];
+  placementWidth = preset.width;
+  placementLength = preset.length;
+  kind = preset.kind;
+  setTool("place");
+}
+
+function rotatePlacementStamp(delta: number) {
+  placementRotation = normalizeDegrees(placementRotation + delta);
+  render();
+}
+
+function setPlanZoom(nextZoom: number) {
+  zoom = clamp(Number(nextZoom.toFixed(2)), 0.18, 1.2);
+  render();
+}
+
+function cancelCurrentAction() {
+  draft = [];
+  pointerStart = null;
+  activeTransform = null;
+  pointerPoint = null;
+  setTool("select");
+}
+
+function handleHotkeys(event: KeyboardEvent) {
+  const key = event.key.toLowerCase();
+  const combo = event.metaKey || event.ctrlKey;
+
+  if (combo && key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) redoEdit();
+    else undoEdit();
+    return;
+  }
+  if (combo && key === "y") {
+    event.preventDefault();
+    redoEdit();
+    return;
+  }
+  if (combo && !["=", "+", "-", "0"].includes(event.key)) return;
+
+  if (isTypingTarget(event.target)) {
+    if (event.key === "Escape") (event.target as HTMLElement).blur();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancelCurrentAction();
+    return;
+  }
+
+  if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    deleteSelectedFeature();
+    return;
+  }
+
+  if (event.key.startsWith("Arrow")) {
+    const step = event.shiftKey ? 25 : 5;
+    const movement = {
+      ArrowUp: { dx: 0, dy: -step },
+      ArrowDown: { dx: 0, dy: step },
+      ArrowLeft: { dx: -step, dy: 0 },
+      ArrowRight: { dx: step, dy: 0 }
+    }[event.key];
+    if (movement) {
+      event.preventDefault();
+      moveSelected(movement.dx, movement.dy);
+    }
+    return;
+  }
+
+  if (event.code === "BracketLeft" || event.code === "BracketRight") {
+    event.preventDefault();
+    const delta = event.code === "BracketRight" ? 15 : -15;
+    if (event.shiftKey && selectedFeature()) rotateSelectedBy(delta);
+    else rotatePlacementStamp(delta);
+    return;
+  }
+
+  if (event.key === "=" || event.key === "+") {
+    event.preventDefault();
+    setPlanZoom(zoom + 0.08);
+    return;
+  }
+
+  if (event.key === "-") {
+    event.preventDefault();
+    setPlanZoom(zoom - 0.08);
+    return;
+  }
+
+  if (event.key === "0") {
+    event.preventDefault();
+    setPlanZoom(initialZoom);
+    return;
+  }
+
+  const shortcutActions: Record<string, () => void> = {
+    "1": () => setViewMode("plan"),
+    "2": () => setViewMode("model"),
+    b: () => setPlacementPreset("surface"),
+    e: () => setPlacementPreset("entrance"),
+    l: () => setTool("line"),
+    m: () => setTool("rect"),
+    o: () => setTool("ellipse"),
+    p: () => setTool("polygon"),
+    d: duplicateSelectedFeature,
+    t: () => setTool("label"),
+    u: () => setPlacementPreset("underground"),
+    v: () => setTool("select")
+  };
+  const action = shortcutActions[key];
+  if (!action) return;
+  event.preventDefault();
+  action();
+}
+
+function isTypingTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null;
+  return Boolean(element?.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+function deleteSelectedFeature() {
+  if (!selectedId) return;
+  pushHistory();
+  features = features.filter((feature) => feature.id !== selectedId);
+  selectedId = features[0]?.id ?? "";
+  saveState();
+  render();
+}
+
+function duplicateSelectedFeature() {
+  const selected = selectedFeature();
+  if (!selected) return;
+  pushHistory();
+  const duplicate = cloneFeature(selected);
+  duplicate.id = crypto.randomUUID();
+  duplicate.label = selected.label ? `${selected.label} copy` : defaultLabel(selected.kind);
+  duplicate.points = duplicate.points.map((point) => ({ x: point.x + 36, y: point.y + 36 }));
+  features.push(duplicate);
+  selectedId = duplicate.id;
+  saveState();
+  render();
+}
+
+function rotateSelectedBy(delta: number) {
+  const feature = selectedFeature();
+  if (!feature) return;
+  rotateSelectedTo(normalizeDegrees(feature.rotation + delta));
+}
+
+function pushHistory() {
+  undoStack.push(snapshotState());
+  if (undoStack.length > 80) undoStack.shift();
+  redoStack = [];
+}
+
+function undoEdit() {
+  const previous = undoStack.pop();
+  if (!previous) return;
+  redoStack.push(snapshotState());
+  restoreSnapshot(previous);
+}
+
+function redoEdit() {
+  const next = redoStack.pop();
+  if (!next) return;
+  undoStack.push(snapshotState());
+  restoreSnapshot(next);
+}
+
+function snapshotState(): HistorySnapshot {
+  return {
+    features: features.map(cloneFeature),
+    selectedId
+  };
+}
+
+function restoreSnapshot(snapshot: HistorySnapshot) {
+  features = snapshot.features.map(cloneFeature);
+  selectedId = features.some((feature) => feature.id === snapshot.selectedId) ? snapshot.selectedId : features[0]?.id ?? "";
+  saveState();
+  render();
 }
 
 function onPointerDown(event: PointerEvent) {
@@ -492,7 +799,8 @@ function onPointerDown(event: PointerEvent) {
         initialPoints: clonePoints(feature.points),
         initialRotation: feature.rotation,
         center,
-        startAngle: angleBetween(center, point)
+        startAngle: angleBetween(center, point),
+        historyPushed: false
       };
       event.preventDefault();
       return;
@@ -508,7 +816,8 @@ function onPointerDown(event: PointerEvent) {
         initialPoints: clonePoints(selected.points),
         initialRotation: selected.rotation,
         center: centroid(selected.points),
-        startAngle: 0
+        startAngle: 0,
+        historyPushed: false
       };
     }
     render();
@@ -567,6 +876,7 @@ function finishPolygon() {
 }
 
 function createFeature(points: Point[], featureKind: FeatureKind, label: string) {
+  pushHistory();
   const feature: Feature = {
     id: crypto.randomUUID(),
     kind: featureKind,
@@ -585,6 +895,7 @@ function createFeature(points: Point[], featureKind: FeatureKind, label: string)
 }
 
 function createPlacementFeature(center: Point) {
+  pushHistory();
   const preset = placementDefaults[placementPreset];
   const points = preset.kind === "entrance" ? [center] : stampPoints(center, placementWidth, placementLength, placementRotation);
   const feature: Feature = {
@@ -609,6 +920,10 @@ function updateActiveTransform(point: Point) {
   if (!activeTransform) return;
   const feature = features.find((candidate) => candidate.id === activeTransform?.id);
   if (!feature) return;
+  if (!activeTransform.historyPushed) {
+    pushHistory();
+    activeTransform.historyPushed = true;
+  }
 
   if (activeTransform.mode === "move") {
     const dx = point.x - activeTransform.startPoint.x;
@@ -629,6 +944,7 @@ function updateActiveTransform(point: Point) {
 
 function moveSelected(dx: number, dy: number) {
   if (!selectedId || (!dx && !dy)) return;
+  pushHistory();
   features = features.map((feature) => {
     if (feature.id !== selectedId) return feature;
     return { ...feature, points: feature.points.map((point) => ({ x: point.x + dx, y: point.y + dy })) };
@@ -640,6 +956,7 @@ function moveSelected(dx: number, dy: number) {
 function rotateSelectedTo(rotation: number) {
   const feature = selectedFeature();
   if (!feature) return;
+  pushHistory();
   const nextRotation = normalizeDegrees(rotation);
   const delta = degreesToRadians(nextRotation - feature.rotation);
   const center = centroid(feature.points);
@@ -653,6 +970,7 @@ function rotateSelectedTo(rotation: number) {
 
 function updateSelected(patch: Partial<Feature>) {
   if (!selectedId) return;
+  pushHistory();
   features = features.map((feature) => feature.id === selectedId ? normalizeFeature({ ...feature, ...patch }) : feature);
   saveState();
   render();
@@ -672,6 +990,7 @@ function render() {
   renderList();
   renderInspector();
   renderModel();
+  renderIcons();
 }
 
 function renderToolbar() {
@@ -680,6 +999,21 @@ function renderToolbar() {
   });
   document.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === viewMode);
+  });
+  document.querySelector<HTMLButtonElement>("#undoEdit")!.disabled = undoStack.length === 0;
+  document.querySelector<HTMLButtonElement>("#redoEdit")!.disabled = redoStack.length === 0;
+}
+
+function renderIcons() {
+  document.querySelectorAll<HTMLElement>("[data-icon]").forEach((slot) => {
+    const icon = iconNodes[slot.dataset.icon ?? ""];
+    if (!icon) return;
+    const element = createElement(icon, {
+      width: 18,
+      height: 18,
+      "aria-hidden": "true"
+    });
+    slot.replaceChildren(element);
   });
 }
 
@@ -748,6 +1082,7 @@ function renderInspector() {
   document.querySelector<HTMLInputElement>("#placementWidth")!.value = String(Math.round(placementWidth));
   document.querySelector<HTMLInputElement>("#placementLength")!.value = String(Math.round(placementLength));
   document.querySelector<HTMLInputElement>("#placementRotation")!.value = String(placementRotation);
+  document.querySelector<HTMLInputElement>("#zoom")!.value = String(zoom);
   document.querySelector<HTMLInputElement>("#imageryUrl")!.value = imagerySource.url;
   document.querySelector<HTMLInputElement>("#imageryCredit")!.value = imagerySource.credit;
   document.querySelector<HTMLTextAreaElement>("#imageryLicense")!.value = imagerySource.license;
@@ -893,6 +1228,7 @@ function importJson(event: Event) {
   const reader = new FileReader();
   reader.onload = () => {
     const parsed = JSON.parse(String(reader.result));
+    pushHistory();
     features = (parsed.features ?? []).map(normalizeFeature);
     imagerySource = normalizeImagerySource(parsed.imagerySource ?? imagerySource);
     selectedId = features[0]?.id ?? "";
@@ -1021,6 +1357,13 @@ function selectedFeature() {
   return features.find((feature) => feature.id === selectedId);
 }
 
+function cloneFeature(feature: Feature): Feature {
+  return {
+    ...feature,
+    points: clonePoints(feature.points)
+  };
+}
+
 function clonePoints(points: Point[]) {
   return points.map((point) => ({ ...point }));
 }
@@ -1073,6 +1416,7 @@ function bounds(points: Point[]) {
 }
 
 function seedNatanzLayout() {
+  pushHistory();
   const starters: Array<Omit<Feature, "id">> = [
     {
       kind: "surface",

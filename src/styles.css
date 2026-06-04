@@ -37,6 +37,57 @@ button.active {
   border-color: #07171d;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+button:disabled:hover {
+  background: #f4f1ea;
+  color: #07171d;
+  border-color: #9b968e;
+}
+
+button svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  flex: none;
+}
+
+kbd {
+  min-width: 22px;
+  border: 1px solid rgba(7, 23, 29, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.46);
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 3px 4px;
+  text-align: center;
+}
+
+.iconText {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.iconText [data-icon],
+.segmented [data-icon] {
+  display: grid;
+  place-items: center;
+}
+
+.danger:hover {
+  background: #7a241b;
+  border-color: #7a241b;
+  color: #f7f4ee;
+}
+
 .shell {
   min-height: 100vh;
   display: grid;
@@ -113,6 +164,31 @@ label {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 6px;
+}
+
+.segmented button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 42px;
+  min-width: 0;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.segmented button span:not([data-icon]) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmented button.active kbd,
+button:hover kbd,
+button.active kbd {
+  border-color: rgba(247, 244, 238, 0.36);
+  background: rgba(247, 244, 238, 0.14);
 }
 
 .twoCol,
