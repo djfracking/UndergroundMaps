@@ -61,6 +61,33 @@ type PanState = {
   startPan: Point;
 };
 
+type TransformMode = "move" | "rotate" | "scale";
+type ScaleHandle = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+
+type OrientedBox = {
+  center: Point;
+  rotation: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
+type ActiveTransform = {
+  mode: TransformMode;
+  id: string;
+  startPoint: Point;
+  initialPoints: Point[];
+  initialRotation: number;
+  center: Point;
+  startAngle: number;
+  historyPushed: boolean;
+  scaleAnchor?: Point;
+  scaleHandle?: ScaleHandle;
+  scaleHandleStart?: Point;
+  initialLocalPoints?: Point[];
+};
+
 const image = { width: 2709, height: 2320 };
 const worldScale = 0.18;
 const initialZoom = 0.38;
@@ -102,6 +129,8 @@ const iconNodes: Record<string, IconNode> = {
   undo: Undo2
 };
 
+const scaleHandles: ScaleHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+
 const placementDefaults: Record<PlacementPreset, { kind: FeatureKind; label: string; width: number; length: number; height: number; depth: number }> = {
   surface: { kind: "surface", label: "Surface building", width: 260, length: 150, height: 34, depth: 0 },
   underground: { kind: "underground", label: "Underground volume", width: 430, length: 240, height: 58, depth: 80 },
@@ -130,16 +159,9 @@ let placementRotation = 0;
 let pointerPoint: Point | null = null;
 let activePan: PanState | null = null;
 let spacePanning = false;
-let activeTransform: null | {
-  mode: "move" | "rotate";
-  id: string;
-  startPoint: Point;
-  initialPoints: Point[];
-  initialRotation: number;
-  center: Point;
-  startAngle: number;
-  historyPushed: boolean;
-} = null;
+let freeTransformId = "";
+let lastSelectClick: { id: string; point: Point; time: number } | null = null;
+let activeTransform: ActiveTransform | null = null;
 let undoStack: HistorySnapshot[] = [];
 let redoStack: HistorySnapshot[] = [];
 
@@ -575,7 +597,8 @@ function bind() {
   });
   stage.addEventListener("wheel", onStageWheel, { passive: false });
   stage.addEventListener("contextmenu", (event) => event.preventDefault());
-  stage.addEventListener("dblclick", finishPolygon);
+  stage.addEventListener("click", onStageClick);
+  stage.addEventListener("dblclick", onStageDoubleClick);
   window.addEventListener("resize", resizeModel);
   window.addEventListener("keydown", handleHotkeys);
   window.addEventListener("keyup", handleKeyUp);
@@ -596,6 +619,7 @@ function setTool(nextTool: Tool) {
   pointerStart = null;
   activeTransform = null;
   clearPlanPanState();
+  if (tool !== "select") freeTransformId = "";
   if (tool === "place") viewMode = "plan";
   render();
   if (viewMode === "model") resizeModel();
@@ -607,6 +631,7 @@ function setViewMode(nextViewMode: ViewMode) {
   pointerStart = null;
   activeTransform = null;
   clearPlanPanState();
+  if (viewMode !== "plan") freeTransformId = "";
   render();
   resizeModel();
 }
@@ -652,6 +677,7 @@ function cancelCurrentAction() {
   pointerStart = null;
   activeTransform = null;
   clearPlanPanState();
+  freeTransformId = "";
   pointerPoint = null;
   setTool("select");
 }
@@ -733,6 +759,11 @@ function handleHotkeys(event: KeyboardEvent) {
   if (combo && key === "y") {
     event.preventDefault();
     redoEdit();
+    return;
+  }
+  if (combo && key === "t") {
+    event.preventDefault();
+    toggleFreeTransform();
     return;
   }
   if (combo && !["=", "+", "-", "0"].includes(event.key)) return;
@@ -862,6 +893,29 @@ function rotateSelectedBy(delta: number) {
   rotateSelectedTo(normalizeDegrees(feature.rotation + delta));
 }
 
+function toggleFreeTransform() {
+  const selected = selectedFeature();
+  if (!selected || selected.points.length < 2) return;
+  tool = "select";
+  freeTransformId = freeTransformId === selected.id ? "" : selected.id;
+  draft = [];
+  pointerStart = null;
+  activeTransform = null;
+  render();
+}
+
+function openFreeTransform(featureId: string) {
+  const feature = features.find((candidate) => candidate.id === featureId);
+  if (!feature || feature.points.length < 2) return;
+  tool = "select";
+  selectedId = feature.id;
+  freeTransformId = feature.id;
+  draft = [];
+  pointerStart = null;
+  activeTransform = null;
+  render();
+}
+
 function pushHistory() {
   undoStack.push(snapshotState());
   if (undoStack.length > 80) undoStack.shift();
@@ -914,6 +968,33 @@ function onPointerDown(event: PointerEvent) {
     const feature = selectedFeature();
     if (handle && feature) {
       const center = centroid(feature.points);
+      const isDoubleTransformClick = handle.dataset.transform === "move" && lastSelectClick?.id === feature.id && event.timeStamp - lastSelectClick.time < 1000 && distance(point, lastSelectClick.point) < 44 / zoom;
+      if (isDoubleTransformClick) {
+        lastSelectClick = null;
+        event.preventDefault();
+        openFreeTransform(feature.id);
+        return;
+      }
+      if (handle.dataset.transform === "scale") {
+        const box = orientedBox(feature);
+        const scaleHandle = handle.dataset.scaleHandle as ScaleHandle;
+        activeTransform = {
+          mode: "scale",
+          id: feature.id,
+          startPoint: point,
+          initialPoints: clonePoints(feature.points),
+          initialRotation: feature.rotation,
+          center: box.center,
+          startAngle: 0,
+          historyPushed: false,
+          scaleAnchor: scaleAnchorLocal(box, scaleHandle),
+          scaleHandle,
+          scaleHandleStart: scaleHandleLocal(box, scaleHandle),
+          initialLocalPoints: feature.points.map((candidate) => toLocalPoint(candidate, box.center, box.rotation))
+        };
+        event.preventDefault();
+        return;
+      }
       activeTransform = {
         mode: handle.dataset.transform === "rotate" ? "rotate" : "move",
         id: feature.id,
@@ -928,7 +1009,16 @@ function onPointerDown(event: PointerEvent) {
       return;
     }
     const node = (event.target as Element).closest<SVGElement>("[data-id]");
-    selectedId = node?.dataset.id ?? "";
+    const nextSelectedId = node?.dataset.id ?? "";
+    const isDoubleSelect = Boolean(nextSelectedId && lastSelectClick?.id === nextSelectedId && event.timeStamp - lastSelectClick.time < 1000 && distance(point, lastSelectClick.point) < 36 / zoom);
+    lastSelectClick = nextSelectedId ? { id: nextSelectedId, point, time: event.timeStamp } : null;
+    if (selectedId !== nextSelectedId) freeTransformId = "";
+    selectedId = nextSelectedId;
+    if (isDoubleSelect) {
+      event.preventDefault();
+      openFreeTransform(nextSelectedId);
+      return;
+    }
     const selected = selectedFeature();
     if (selected) {
       activeTransform = {
@@ -955,6 +1045,34 @@ function onPointerDown(event: PointerEvent) {
     return;
   }
   pointerStart = point;
+}
+
+function onStageClick(event: MouseEvent) {
+  if (event.detail < 2) return;
+  openFreeTransformFromEvent(event);
+}
+
+function onStageDoubleClick(event: MouseEvent) {
+  if (viewMode !== "plan") return;
+  if (tool === "polygon") {
+    finishPolygon();
+    return;
+  }
+  openFreeTransformFromEvent(event);
+}
+
+function openFreeTransformFromEvent(event: MouseEvent) {
+  if (viewMode !== "plan" || tool !== "select") return;
+  const node = (event.target as Element).closest<SVGElement>("[data-id]");
+  const transformNode = (event.target as Element).closest<SVGElement>("[data-transform], .transformBox");
+  const nextSelectedId = node?.dataset.id ?? (transformNode ? selectedId : "");
+  if (!nextSelectedId) {
+    freeTransformId = "";
+    render();
+    return;
+  }
+  event.preventDefault();
+  openFreeTransform(nextSelectedId);
 }
 
 function onPointerMove(event: PointerEvent) {
@@ -1059,10 +1177,12 @@ function updateActiveTransform(point: Point) {
     const dx = point.x - activeTransform.startPoint.x;
     const dy = point.y - activeTransform.startPoint.y;
     feature.points = activeTransform.initialPoints.map((initial) => ({ x: initial.x + dx, y: initial.y + dy }));
-  } else {
+  } else if (activeTransform.mode === "rotate") {
     const delta = angleBetween(activeTransform.center, point) - activeTransform.startAngle;
     feature.points = rotatePoints(activeTransform.initialPoints, activeTransform.center, delta);
     feature.rotation = normalizeDegrees(activeTransform.initialRotation + radiansToDegrees(delta));
+  } else {
+    scaleActiveFeature(feature, point);
   }
 
   renderFeatures();
@@ -1070,6 +1190,22 @@ function updateActiveTransform(point: Point) {
   renderList();
   renderInspector();
   renderModel();
+}
+
+function scaleActiveFeature(feature: Feature, point: Point) {
+  if (!activeTransform?.scaleAnchor || !activeTransform.scaleHandleStart || !activeTransform.initialLocalPoints) return;
+  const pointerLocal = toLocalPoint(point, activeTransform.center, activeTransform.initialRotation);
+  const anchor = activeTransform.scaleAnchor;
+  const handleStart = activeTransform.scaleHandleStart;
+  const handle = activeTransform.scaleHandle ?? "se";
+  const affectsX = handle.includes("e") || handle.includes("w");
+  const affectsY = handle.includes("n") || handle.includes("s");
+  const scaleX = affectsX ? scaleRatio(pointerLocal.x - anchor.x, handleStart.x - anchor.x) : 1;
+  const scaleY = affectsY ? scaleRatio(pointerLocal.y - anchor.y, handleStart.y - anchor.y) : 1;
+  feature.points = activeTransform.initialLocalPoints.map((initial) => fromLocalPoint({
+    x: anchor.x + (initial.x - anchor.x) * scaleX,
+    y: anchor.y + (initial.y - anchor.y) * scaleY
+  }, activeTransform.center, activeTransform.initialRotation));
 }
 
 function moveSelected(dx: number, dy: number) {
@@ -1162,13 +1298,27 @@ function renderTransform() {
   const handleAngle = degreesToRadians(selected.rotation - 90);
   const rotateHandle = { x: center.x + Math.cos(handleAngle) * radius, y: center.y + Math.sin(handleAngle) * radius };
   const closeOutline = selected.kind !== "road" && selected.kind !== "fence";
+  const freeTransform = freeTransformId === selected.id && selected.points.length > 1 ? freeTransformSvg(selected) : "";
   transformLayer.innerHTML = `
     <g class="transformBox">
       <path d="${pathData(selected.points, closeOutline)}" />
+      ${freeTransform}
       <line x1="${center.x}" y1="${center.y}" x2="${rotateHandle.x}" y2="${rotateHandle.y}" />
       <circle data-transform="move" cx="${center.x}" cy="${center.y}" r="18" />
       <circle data-transform="rotate" class="rotateHandle" cx="${rotateHandle.x}" cy="${rotateHandle.y}" r="24" />
     </g>
+  `;
+}
+
+function freeTransformSvg(feature: Feature) {
+  const box = orientedBox(feature);
+  const points = ["nw", "ne", "se", "sw"].map((handle) => scaleHandleWorld(box, handle as ScaleHandle));
+  return `
+    <path class="freeTransformBounds" d="${pathData(points, true)}" />
+    ${scaleHandles.map((handle) => {
+      const point = scaleHandleWorld(box, handle);
+      return `<rect data-transform="scale" data-scale-handle="${handle}" class="scaleHandle ${handle}" x="${point.x - 18}" y="${point.y - 18}" width="36" height="36" transform="rotate(${box.rotation} ${point.x} ${point.y})" />`;
+    }).join("")}
   `;
 }
 
@@ -1481,6 +1631,67 @@ function stampPoints(center: Point, width: number, length: number, rotation: num
     { x: center.x - halfWidth, y: center.y + halfLength }
   ];
   return rotatePoints(base, center, degreesToRadians(rotation));
+}
+
+function orientedBox(feature: Feature): OrientedBox {
+  const center = centroid(feature.points);
+  const rotation = feature.rotation;
+  const localPoints = feature.points.map((point) => toLocalPoint(point, center, rotation));
+  const box = bounds(localPoints);
+  return {
+    center,
+    rotation,
+    minX: box.minX,
+    maxX: box.maxX,
+    minY: box.minY,
+    maxY: box.maxY
+  };
+}
+
+function scaleHandleLocal(box: OrientedBox, handle: ScaleHandle): Point {
+  const midX = (box.minX + box.maxX) / 2;
+  const midY = (box.minY + box.maxY) / 2;
+  return {
+    nw: { x: box.minX, y: box.minY },
+    n: { x: midX, y: box.minY },
+    ne: { x: box.maxX, y: box.minY },
+    e: { x: box.maxX, y: midY },
+    se: { x: box.maxX, y: box.maxY },
+    s: { x: midX, y: box.maxY },
+    sw: { x: box.minX, y: box.maxY },
+    w: { x: box.minX, y: midY }
+  }[handle];
+}
+
+function scaleAnchorLocal(box: OrientedBox, handle: ScaleHandle): Point {
+  return {
+    nw: scaleHandleLocal(box, "se"),
+    n: scaleHandleLocal(box, "s"),
+    ne: scaleHandleLocal(box, "sw"),
+    e: scaleHandleLocal(box, "w"),
+    se: scaleHandleLocal(box, "nw"),
+    s: scaleHandleLocal(box, "n"),
+    sw: scaleHandleLocal(box, "ne"),
+    w: scaleHandleLocal(box, "e")
+  }[handle];
+}
+
+function scaleHandleWorld(box: OrientedBox, handle: ScaleHandle): Point {
+  return fromLocalPoint(scaleHandleLocal(box, handle), box.center, box.rotation);
+}
+
+function toLocalPoint(point: Point, center: Point, rotation: number): Point {
+  const unrotated = rotatedPoint(point, center, degreesToRadians(-rotation));
+  return { x: unrotated.x - center.x, y: unrotated.y - center.y };
+}
+
+function fromLocalPoint(point: Point, center: Point, rotation: number): Point {
+  return rotatedPoint({ x: center.x + point.x, y: center.y + point.y }, center, degreesToRadians(rotation));
+}
+
+function scaleRatio(current: number, initial: number) {
+  if (Math.abs(initial) < 0.001) return 1;
+  return clamp(current / initial, 0.06, 20);
 }
 
 function selectedFeature() {

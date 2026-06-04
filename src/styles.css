@@ -437,6 +437,14 @@ textarea.compact {
   vector-effect: non-scaling-stroke;
 }
 
+.transformBox .freeTransformBounds {
+  fill: none;
+  stroke: #f7f4ee;
+  stroke-width: 6px;
+  stroke-dasharray: 0;
+  vector-effect: non-scaling-stroke;
+}
+
 .transformBox circle {
   pointer-events: auto;
   cursor: move;
@@ -449,6 +457,34 @@ textarea.compact {
 .transformBox .rotateHandle {
   cursor: grab;
   fill: #f7f4ee;
+}
+
+.transformBox .scaleHandle {
+  pointer-events: auto;
+  fill: #f7f4ee;
+  stroke: #07171d;
+  stroke-width: 5px;
+  vector-effect: non-scaling-stroke;
+}
+
+.transformBox .scaleHandle.n,
+.transformBox .scaleHandle.s {
+  cursor: ns-resize;
+}
+
+.transformBox .scaleHandle.e,
+.transformBox .scaleHandle.w {
+  cursor: ew-resize;
+}
+
+.transformBox .scaleHandle.nw,
+.transformBox .scaleHandle.se {
+  cursor: nwse-resize;
+}
+
+.transformBox .scaleHandle.ne,
+.transformBox .scaleHandle.sw {
+  cursor: nesw-resize;
 }
 
 .featureList {
