@@ -1294,30 +1294,35 @@ function renderTransform() {
     return;
   }
   const center = centroid(selected.points);
-  const radius = Math.max(85, Math.sqrt(areaBounds(selected.points)) * 0.7);
+  const controlScale = controlUnits();
+  const moveRadius = 7 * controlScale;
+  const rotateRadius = 9 * controlScale;
+  const radius = Math.max(46 * controlScale, Math.sqrt(areaBounds(selected.points)) * 0.56);
   const handleAngle = degreesToRadians(selected.rotation - 90);
   const rotateHandle = { x: center.x + Math.cos(handleAngle) * radius, y: center.y + Math.sin(handleAngle) * radius };
   const closeOutline = selected.kind !== "road" && selected.kind !== "fence";
-  const freeTransform = freeTransformId === selected.id && selected.points.length > 1 ? freeTransformSvg(selected) : "";
+  const freeTransform = freeTransformId === selected.id && selected.points.length > 1 ? freeTransformSvg(selected, controlScale) : "";
   transformLayer.innerHTML = `
     <g class="transformBox">
       <path d="${pathData(selected.points, closeOutline)}" />
       ${freeTransform}
       <line x1="${center.x}" y1="${center.y}" x2="${rotateHandle.x}" y2="${rotateHandle.y}" />
-      <circle data-transform="move" cx="${center.x}" cy="${center.y}" r="18" />
-      <circle data-transform="rotate" class="rotateHandle" cx="${rotateHandle.x}" cy="${rotateHandle.y}" r="24" />
+      <circle data-transform="move" cx="${center.x}" cy="${center.y}" r="${moveRadius}" />
+      <circle data-transform="rotate" class="rotateHandle" cx="${rotateHandle.x}" cy="${rotateHandle.y}" r="${rotateRadius}" />
     </g>
   `;
 }
 
-function freeTransformSvg(feature: Feature) {
+function freeTransformSvg(feature: Feature, controlScale: number) {
   const box = orientedBox(feature);
   const points = ["nw", "ne", "se", "sw"].map((handle) => scaleHandleWorld(box, handle as ScaleHandle));
+  const handleSize = 12 * controlScale;
+  const halfHandle = handleSize / 2;
   return `
     <path class="freeTransformBounds" d="${pathData(points, true)}" />
     ${scaleHandles.map((handle) => {
       const point = scaleHandleWorld(box, handle);
-      return `<rect data-transform="scale" data-scale-handle="${handle}" class="scaleHandle ${handle}" x="${point.x - 18}" y="${point.y - 18}" width="36" height="36" transform="rotate(${box.rotation} ${point.x} ${point.y})" />`;
+      return `<rect data-transform="scale" data-scale-handle="${handle}" class="scaleHandle ${handle}" x="${point.x - halfHandle}" y="${point.y - halfHandle}" width="${handleSize}" height="${handleSize}" transform="rotate(${box.rotation} ${point.x} ${point.y})" />`;
     }).join("")}
   `;
 }
@@ -1857,6 +1862,12 @@ function clientDeltaToStageDelta(dx: number, dy: number): Point {
     x: matrix ? dx / matrix.a : dx,
     y: matrix ? dy / matrix.d : dy
   };
+}
+
+function controlUnits() {
+  const matrix = viewport.getScreenCTM();
+  if (!matrix?.a) return 1;
+  return 1 / Math.abs(matrix.a);
 }
 
 function svgPoint(event: PointerEvent): Point {
