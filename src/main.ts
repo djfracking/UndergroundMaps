@@ -50,6 +50,16 @@ type ImagerySource = {
   referenceOnly: boolean;
 };
 
+type ReferenceLayer = {
+  id: string;
+  name: string;
+  dataUrl: string;
+  opacity: number;
+  visible: boolean;
+  source: "file" | "url";
+  createdAt: number;
+};
+
 type HistorySnapshot = {
   features: Feature[];
   selectedId: string;
@@ -93,6 +103,11 @@ const worldScale = 0.18;
 const initialZoom = 0.38;
 const minPlanZoom = 0.12;
 const maxPlanZoom = 5;
+const referenceDbName = "undergroundmaps-reference-layers";
+const referenceDbStore = "layers";
+const referenceActiveKey = "undergroundmaps:activeReferenceLayer";
+const referenceShowKey = "undergroundmaps:showReferences";
+const referenceOpacityKey = "undergroundmaps:referenceOpacity";
 
 const toolShortcuts: Record<Tool, string> = {
   select: "V",
@@ -146,11 +161,13 @@ let imagerySource: ImagerySource = loadImagerySource();
 let selectedId = features[0]?.id ?? "";
 let draft: Point[] = [];
 let pointerStart: Point | null = null;
-let referenceOpacity = 0.48;
-let showReference = true;
+let referenceLayers: ReferenceLayer[] = [];
+let activeReferenceId = localStorage.getItem(referenceActiveKey) ?? "";
+let referenceOpacity = Number(localStorage.getItem(referenceOpacityKey) ?? "0.48");
+let showReference = localStorage.getItem(referenceShowKey) !== "false";
 let zoom = initialZoom;
 let pan = { x: 0, y: 0 };
-let referenceDataUrl = "";
+let referenceRenderKey = "";
 let terrainTexture: THREE.Texture | null = null;
 let placementPreset: PlacementPreset = "surface";
 let placementWidth = placementDefaults.surface.width;
@@ -167,6 +184,7 @@ let redoStack: HistorySnapshot[] = [];
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
+const svgNs = "http://www.w3.org/2000/svg";
 
 app.innerHTML = `
   <main class="shell">
@@ -291,12 +309,13 @@ app.innerHTML = `
         </div>
 
         <div class="group">
-          <label for="referenceUpload">Reference image</label>
-          <input id="referenceUpload" type="file" accept="image/*" />
-          <p class="hint">Loaded only in your browser for QA; not stored or exported.</p>
-          <label for="referenceOpacity">Reference opacity</label>
+          <label for="referenceUpload">Reference images</label>
+          <input id="referenceUpload" type="file" accept="image/*" multiple />
+          <p class="hint">Saved in this browser for your QA; still omitted from schematic exports.</p>
+          <div id="referenceList" class="referenceList"></div>
+          <label for="referenceOpacity">Active layer opacity</label>
           <input id="referenceOpacity" type="range" min="0" max="1" step="0.02" value="0.48" />
-          <label class="toggle"><input id="showReference" type="checkbox" checked /> Show reference</label>
+          <label class="toggle"><input id="showReference" type="checkbox" checked /> Show references</label>
         </div>
 
         <div class="group">
@@ -360,7 +379,7 @@ app.innerHTML = `
               </filter>
             </defs>
             <g id="viewport">
-              <image id="referenceImage" width="${image.width}" height="${image.height}" preserveAspectRatio="none" />
+              <g id="referenceLayer"></g>
               <rect class="terrain" width="${image.width}" height="${image.height}" />
               <g id="featureLayer"></g>
               <g id="transformLayer"></g>
@@ -398,7 +417,7 @@ app.innerHTML = `
 
 const stage = document.querySelector<SVGSVGElement>("#stage")!;
 const viewport = document.querySelector<SVGGElement>("#viewport")!;
-const referenceImage = document.querySelector<SVGImageElement>("#referenceImage")!;
+const referenceLayer = document.querySelector<SVGGElement>("#referenceLayer")!;
 const featureLayer = document.querySelector<SVGGElement>("#featureLayer")!;
 const transformLayer = document.querySelector<SVGGElement>("#transformLayer")!;
 const draftLayer = document.querySelector<SVGGElement>("#draftLayer")!;
@@ -437,6 +456,7 @@ bind();
 resizeModel();
 render();
 animate();
+void initializeReferenceLayers();
 
 function bind() {
   document.querySelector("#viewButtons")!.addEventListener("click", (event) => {
@@ -503,15 +523,24 @@ function bind() {
 
   document.querySelector<HTMLInputElement>("#referenceOpacity")!.addEventListener("input", (event) => {
     referenceOpacity = Number((event.target as HTMLInputElement).value);
+    const active = activeReferenceLayer();
+    if (active) {
+      active.opacity = referenceOpacity;
+      void persistReferenceLayer(active);
+    }
+    saveReferenceUiState();
     render();
   });
 
   document.querySelector<HTMLInputElement>("#showReference")!.addEventListener("change", (event) => {
     showReference = (event.target as HTMLInputElement).checked;
+    saveReferenceUiState();
     render();
   });
 
-  document.querySelector<HTMLInputElement>("#referenceUpload")!.addEventListener("change", loadReferenceImage);
+  document.querySelector<HTMLInputElement>("#referenceUpload")!.addEventListener("change", (event) => {
+    void loadReferenceImage(event);
+  });
 
   document.querySelector<HTMLInputElement>("#zoom")!.addEventListener("input", (event) => {
     setPlanZoom(Number((event.target as HTMLInputElement).value));
@@ -1244,16 +1273,16 @@ function updateSelected(patch: Partial<Feature>) {
 
 function render() {
   viewport.setAttribute("transform", `matrix(${zoom} 0 0 ${zoom} ${pan.x} ${pan.y})`);
-  referenceImage.style.display = showReference && referenceImage.getAttribute("href") ? "block" : "none";
-  referenceImage.style.opacity = String(referenceOpacity);
   stage.classList.toggle("hidden", viewMode !== "plan");
   modelStage.classList.toggle("active", viewMode === "model");
   document.querySelector(".modelHud")!.classList.toggle("active", viewMode === "model");
+  renderReferenceLayers();
   renderToolbar();
   renderFeatures();
   renderTransform();
   renderDraft();
   renderList();
+  renderReferenceList();
   renderInspector();
   renderModel();
   renderIcons();
@@ -1280,6 +1309,56 @@ function renderIcons() {
       "aria-hidden": "true"
     });
     slot.replaceChildren(element);
+  });
+}
+
+function renderReferenceLayers() {
+  const key = `${showReference}:${referenceLayers.map((layer) => `${layer.id}:${layer.visible}:${layer.opacity}:${layer.dataUrl.length}`).join("|")}`;
+  if (key === referenceRenderKey) return;
+  referenceRenderKey = key;
+  referenceLayer.replaceChildren();
+  if (!showReference) return;
+  for (const layer of referenceLayers) {
+    if (!layer.visible) continue;
+    const imageElement = document.createElementNS(svgNs, "image");
+    imageElement.setAttribute("href", layer.dataUrl);
+    imageElement.setAttribute("width", String(image.width));
+    imageElement.setAttribute("height", String(image.height));
+    imageElement.setAttribute("preserveAspectRatio", "none");
+    imageElement.setAttribute("opacity", String(layer.opacity));
+    imageElement.dataset.referenceId = layer.id;
+    referenceLayer.appendChild(imageElement);
+  }
+}
+
+function renderReferenceList() {
+  const list = document.querySelector<HTMLDivElement>("#referenceList")!;
+  if (!referenceLayers.length) {
+    list.innerHTML = `<p class="hint">No saved reference images yet.</p>`;
+    return;
+  }
+  list.innerHTML = referenceLayers.map((layer) => `
+    <div class="referenceItem ${layer.id === activeReferenceId ? "active" : ""}">
+      <button data-reference-select="${layer.id}">
+        <span>${escapeHtml(layer.name)}</span>
+        <small>${layer.source} / ${new Date(layer.createdAt).toLocaleDateString()}</small>
+      </button>
+      <label class="miniToggle"><input data-reference-visible="${layer.id}" type="checkbox" ${layer.visible ? "checked" : ""} /> visible</label>
+      <button data-reference-delete="${layer.id}" class="danger">Delete</button>
+    </div>
+  `).join("");
+  list.querySelectorAll<HTMLButtonElement>("[data-reference-select]").forEach((button) => {
+    button.addEventListener("click", () => selectReferenceLayer(button.dataset.referenceSelect ?? ""));
+  });
+  list.querySelectorAll<HTMLInputElement>("[data-reference-visible]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      void setReferenceLayerVisible(checkbox.dataset.referenceVisible ?? "", checkbox.checked);
+    });
+  });
+  list.querySelectorAll<HTMLButtonElement>("[data-reference-delete]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void deleteReferenceLayer(button.dataset.referenceDelete ?? "");
+    });
   });
 }
 
@@ -1368,6 +1447,8 @@ function renderInspector() {
   document.querySelector<HTMLInputElement>("#placementLength")!.value = String(Math.round(placementLength));
   document.querySelector<HTMLInputElement>("#placementRotation")!.value = String(placementRotation);
   document.querySelector<HTMLInputElement>("#zoom")!.value = String(zoom);
+  document.querySelector<HTMLInputElement>("#referenceOpacity")!.value = String(activeReferenceLayer()?.opacity ?? referenceOpacity);
+  document.querySelector<HTMLInputElement>("#showReference")!.checked = showReference;
   document.querySelector<HTMLInputElement>("#imageryUrl")!.value = imagerySource.url;
   document.querySelector<HTMLInputElement>("#imageryCredit")!.value = imagerySource.credit;
   document.querySelector<HTMLTextAreaElement>("#imageryLicense")!.value = imagerySource.license;
@@ -1524,19 +1605,15 @@ function importJson(event: Event) {
   reader.readAsText(file);
 }
 
-function loadReferenceImage(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    referenceDataUrl = String(reader.result);
-    referenceImage.setAttribute("href", referenceDataUrl);
-    showReference = true;
-    document.querySelector<HTMLInputElement>("#showReference")!.checked = true;
-    setTerrainTexture(referenceDataUrl);
-    render();
-  };
-  reader.readAsDataURL(file);
+async function loadReferenceImage(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  if (!files.length) return;
+  for (const file of files) {
+    const dataUrl = await readFileAsDataUrl(file);
+    await addReferenceLayer(file.name, dataUrl, "file");
+  }
+  input.value = "";
 }
 
 function loadImageryUrl() {
@@ -1545,10 +1622,7 @@ function loadImageryUrl() {
   loader.setCrossOrigin("anonymous");
   loader.load(imagerySource.url, (texture) => {
     setTexture(texture);
-    referenceImage.setAttribute("href", imagerySource.url);
-    showReference = true;
-    document.querySelector<HTMLInputElement>("#showReference")!.checked = true;
-    render();
+    void addReferenceLayer(imagerySource.credit || "URL reference", imagerySource.url, "url");
   });
 }
 
@@ -1604,6 +1678,97 @@ function downloadBlob(filename: string, blob: Blob) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+async function initializeReferenceLayers() {
+  try {
+    referenceLayers = await loadReferenceLayers();
+    if (activeReferenceId && !referenceLayers.some((layer) => layer.id === activeReferenceId)) activeReferenceId = "";
+    if (!activeReferenceId) activeReferenceId = referenceLayers[0]?.id ?? "";
+    referenceOpacity = activeReferenceLayer()?.opacity ?? referenceOpacity;
+    saveReferenceUiState();
+    applyActiveReferenceTexture();
+    render();
+  } catch (error) {
+    console.error("Unable to load saved reference images", error);
+  }
+}
+
+async function addReferenceLayer(name: string, dataUrl: string, source: ReferenceLayer["source"]) {
+  const layer = normalizeReferenceLayer({
+    id: crypto.randomUUID(),
+    name,
+    dataUrl,
+    opacity: referenceOpacity,
+    visible: true,
+    source,
+    createdAt: Date.now()
+  });
+  referenceLayers = [layer, ...referenceLayers];
+  activeReferenceId = layer.id;
+  showReference = true;
+  saveReferenceUiState();
+  await persistReferenceLayer(layer);
+  setTerrainTexture(layer.dataUrl);
+  render();
+}
+
+function selectReferenceLayer(id: string) {
+  const layer = referenceLayers.find((candidate) => candidate.id === id);
+  if (!layer) return;
+  activeReferenceId = layer.id;
+  referenceOpacity = layer.opacity;
+  saveReferenceUiState();
+  setTerrainTexture(layer.dataUrl);
+  render();
+}
+
+async function setReferenceLayerVisible(id: string, visible: boolean) {
+  const layer = referenceLayers.find((candidate) => candidate.id === id);
+  if (!layer) return;
+  layer.visible = visible;
+  await persistReferenceLayer(layer);
+  if (layer.id === activeReferenceId && visible) setTerrainTexture(layer.dataUrl);
+  render();
+}
+
+async function deleteReferenceLayer(id: string) {
+  if (!id) return;
+  referenceLayers = referenceLayers.filter((layer) => layer.id !== id);
+  await removeReferenceLayer(id);
+  if (activeReferenceId === id) activeReferenceId = referenceLayers[0]?.id ?? "";
+  referenceOpacity = activeReferenceLayer()?.opacity ?? referenceOpacity;
+  saveReferenceUiState();
+  applyActiveReferenceTexture();
+  render();
+}
+
+function activeReferenceLayer() {
+  return referenceLayers.find((layer) => layer.id === activeReferenceId);
+}
+
+function applyActiveReferenceTexture() {
+  const layer = activeReferenceLayer();
+  if (layer) setTerrainTexture(layer.dataUrl);
+  else {
+    terrainTexture = null;
+    renderModel();
+  }
+}
+
+function saveReferenceUiState() {
+  localStorage.setItem(referenceActiveKey, activeReferenceId);
+  localStorage.setItem(referenceShowKey, String(showReference));
+  localStorage.setItem(referenceOpacityKey, String(referenceOpacity));
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function shapeFromDrag(start: Point, end: Point, activeTool: Tool): Point[] {
@@ -1965,6 +2130,18 @@ function normalizeImagerySource(raw: Partial<ImagerySource>): ImagerySource {
   };
 }
 
+function normalizeReferenceLayer(raw: Partial<ReferenceLayer>): ReferenceLayer {
+  return {
+    id: raw.id ?? crypto.randomUUID(),
+    name: raw.name?.trim() || "Reference image",
+    dataUrl: raw.dataUrl ?? "",
+    opacity: clamp(raw.opacity ?? referenceOpacity, 0, 1),
+    visible: raw.visible ?? true,
+    source: raw.source ?? "file",
+    createdAt: raw.createdAt ?? Date.now()
+  };
+}
+
 function saveState() {
   localStorage.setItem("undergroundmaps:natanz", JSON.stringify(features));
 }
@@ -1991,6 +2168,67 @@ function loadImagerySource(): ImagerySource {
     return normalizeImagerySource({});
   }
   return normalizeImagerySource({});
+}
+
+async function loadReferenceLayers() {
+  const db = await openReferenceDb();
+  try {
+    const transaction = db.transaction(referenceDbStore, "readonly");
+    const request = transaction.objectStore(referenceDbStore).getAll();
+    const layers = await idbRequest<ReferenceLayer[]>(request);
+    return layers.map(normalizeReferenceLayer).sort((a, b) => b.createdAt - a.createdAt);
+  } finally {
+    db.close();
+  }
+}
+
+async function persistReferenceLayer(layer: ReferenceLayer) {
+  const db = await openReferenceDb();
+  try {
+    const transaction = db.transaction(referenceDbStore, "readwrite");
+    transaction.objectStore(referenceDbStore).put(layer);
+    await transactionComplete(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+async function removeReferenceLayer(id: string) {
+  const db = await openReferenceDb();
+  try {
+    const transaction = db.transaction(referenceDbStore, "readwrite");
+    transaction.objectStore(referenceDbStore).delete(id);
+    await transactionComplete(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+function openReferenceDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(referenceDbName, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(referenceDbStore)) db.createObjectStore(referenceDbStore, { keyPath: "id" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function idbRequest<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function transactionComplete(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
 }
 
 function clearGroup(group: THREE.Group) {
