@@ -55,9 +55,17 @@ type HistorySnapshot = {
   selectedId: string;
 };
 
+type PanState = {
+  pointerId: number;
+  startClient: Point;
+  startPan: Point;
+};
+
 const image = { width: 2709, height: 2320 };
 const worldScale = 0.18;
 const initialZoom = 0.38;
+const minPlanZoom = 0.12;
+const maxPlanZoom = 5;
 
 const toolShortcuts: Record<Tool, string> = {
   select: "V",
@@ -120,6 +128,8 @@ let placementWidth = placementDefaults.surface.width;
 let placementLength = placementDefaults.surface.length;
 let placementRotation = 0;
 let pointerPoint: Point | null = null;
+let activePan: PanState | null = null;
+let spacePanning = false;
 let activeTransform: null | {
   mode: "move" | "rotate";
   id: string;
@@ -281,7 +291,12 @@ app.innerHTML = `
 
         <div class="group">
           <label for="zoom">Plan zoom</label>
-          <input id="zoom" type="range" min="0.18" max="1.2" step="0.02" value="0.38" />
+          <input id="zoom" type="range" min="${minPlanZoom}" max="${maxPlanZoom}" step="0.02" value="${initialZoom}" />
+          <button id="resetPlanView" class="iconText" title="Reset plan pan and zoom (0)">
+            <span data-icon="map"></span>
+            <span>Reset view</span>
+            <kbd>0</kbd>
+          </button>
         </div>
 
         <div class="group selected">
@@ -477,9 +492,10 @@ function bind() {
   document.querySelector<HTMLInputElement>("#referenceUpload")!.addEventListener("change", loadReferenceImage);
 
   document.querySelector<HTMLInputElement>("#zoom")!.addEventListener("input", (event) => {
-    zoom = Number((event.target as HTMLInputElement).value);
-    render();
+    setPlanZoom(Number((event.target as HTMLInputElement).value));
   });
+
+  document.querySelector("#resetPlanView")!.addEventListener("click", resetPlanView);
 
   document.querySelector<HTMLInputElement>("#labelInput")!.addEventListener("input", (event) => {
     updateSelected({ label: (event.target as HTMLInputElement).value });
@@ -551,14 +567,18 @@ function bind() {
   stage.addEventListener("pointerdown", onPointerDown);
   stage.addEventListener("pointermove", onPointerMove);
   stage.addEventListener("pointerup", onPointerUp);
+  stage.addEventListener("pointercancel", endPlanPan);
   stage.addEventListener("pointerleave", () => {
-    if (activeTransform) return;
+    if (activePan || activeTransform) return;
     pointerPoint = null;
     renderDraft();
   });
+  stage.addEventListener("wheel", onStageWheel, { passive: false });
+  stage.addEventListener("contextmenu", (event) => event.preventDefault());
   stage.addEventListener("dblclick", finishPolygon);
   window.addEventListener("resize", resizeModel);
   window.addEventListener("keydown", handleHotkeys);
+  window.addEventListener("keyup", handleKeyUp);
 
   document.querySelector("#undoEdit")!.addEventListener("click", undoEdit);
   document.querySelector("#redoEdit")!.addEventListener("click", redoEdit);
@@ -575,6 +595,7 @@ function setTool(nextTool: Tool) {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  clearPlanPanState();
   if (tool === "place") viewMode = "plan";
   render();
   if (viewMode === "model") resizeModel();
@@ -585,6 +606,7 @@ function setViewMode(nextViewMode: ViewMode) {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  clearPlanPanState();
   render();
   resizeModel();
 }
@@ -603,8 +625,25 @@ function rotatePlacementStamp(delta: number) {
   render();
 }
 
-function setPlanZoom(nextZoom: number) {
-  zoom = clamp(Number(nextZoom.toFixed(2)), 0.18, 1.2);
+function setPlanZoom(nextZoom: number, focalStagePoint = stageCenterPoint()) {
+  zoomPlanTo(nextZoom, focalStagePoint);
+}
+
+function zoomPlanTo(nextZoom: number, focalStagePoint: Point) {
+  const clampedZoom = clamp(Number(nextZoom.toFixed(3)), minPlanZoom, maxPlanZoom);
+  if (clampedZoom === zoom) return;
+  const focalImagePoint = imagePointFromStagePoint(focalStagePoint);
+  zoom = clampedZoom;
+  pan = {
+    x: focalStagePoint.x - focalImagePoint.x * zoom,
+    y: focalStagePoint.y - focalImagePoint.y * zoom
+  };
+  render();
+}
+
+function resetPlanView() {
+  zoom = initialZoom;
+  pan = { x: 0, y: 0 };
   render();
 }
 
@@ -612,8 +651,73 @@ function cancelCurrentAction() {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  clearPlanPanState();
   pointerPoint = null;
   setTool("select");
+}
+
+function onStageWheel(event: WheelEvent) {
+  if (viewMode !== "plan" || Math.abs(event.deltaY) < 0.01) return;
+  event.preventDefault();
+  const zoomFactor = Math.exp(-event.deltaY * 0.0015);
+  setPlanZoom(zoom * zoomFactor, stagePointFromClient(event.clientX, event.clientY));
+}
+
+function startPlanPan(event: PointerEvent) {
+  activePan = {
+    pointerId: event.pointerId,
+    startClient: { x: event.clientX, y: event.clientY },
+    startPan: { ...pan }
+  };
+  pointerStart = null;
+  activeTransform = null;
+  draft = [];
+  try {
+    stage.setPointerCapture(event.pointerId);
+  } catch {
+    // Synthetic and some browser-generated auxiliary pointer events may not be capturable.
+  }
+  stage.classList.add("panning");
+  event.preventDefault();
+}
+
+function updatePlanPan(event: PointerEvent) {
+  if (!activePan || event.pointerId !== activePan.pointerId) return;
+  const delta = clientDeltaToStageDelta(event.clientX - activePan.startClient.x, event.clientY - activePan.startClient.y);
+  pan = {
+    x: activePan.startPan.x + delta.x,
+    y: activePan.startPan.y + delta.y
+  };
+  render();
+}
+
+function endPlanPan(event: PointerEvent) {
+  if (!activePan || event.pointerId !== activePan.pointerId) return;
+  if (stage.hasPointerCapture(event.pointerId)) {
+    try {
+      stage.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture can already be gone after cancelled auxiliary-button gestures.
+    }
+  }
+  activePan = null;
+  stage.classList.remove("panning");
+}
+
+function clearPlanPanState() {
+  if (activePan && stage.hasPointerCapture(activePan.pointerId)) {
+    try {
+      stage.releasePointerCapture(activePan.pointerId);
+    } catch {
+      // Capture can already be gone after cancelled auxiliary-button gestures.
+    }
+  }
+  activePan = null;
+  stage.classList.remove("panning");
+}
+
+function shouldStartPlanPan(event: PointerEvent) {
+  return viewMode === "plan" && (event.button === 1 || event.button === 2 || (event.button === 0 && spacePanning));
 }
 
 function handleHotkeys(event: KeyboardEvent) {
@@ -635,6 +739,13 @@ function handleHotkeys(event: KeyboardEvent) {
 
   if (isTypingTarget(event.target)) {
     if (event.key === "Escape") (event.target as HTMLElement).blur();
+    return;
+  }
+
+  if (event.code === "Space") {
+    event.preventDefault();
+    spacePanning = true;
+    stage.classList.add("panReady");
     return;
   }
 
@@ -687,7 +798,7 @@ function handleHotkeys(event: KeyboardEvent) {
 
   if (event.key === "0") {
     event.preventDefault();
-    setPlanZoom(initialZoom);
+    resetPlanView();
     return;
   }
 
@@ -709,6 +820,12 @@ function handleHotkeys(event: KeyboardEvent) {
   if (!action) return;
   event.preventDefault();
   action();
+}
+
+function handleKeyUp(event: KeyboardEvent) {
+  if (event.code !== "Space") return;
+  spacePanning = false;
+  stage.classList.remove("panReady");
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -781,6 +898,11 @@ function restoreSnapshot(snapshot: HistorySnapshot) {
 
 function onPointerDown(event: PointerEvent) {
   if (viewMode !== "plan") return;
+  if (shouldStartPlanPan(event)) {
+    startPlanPan(event);
+    return;
+  }
+  if (event.button !== 0) return;
   const point = svgPoint(event);
   pointerPoint = point;
   if (tool === "place") {
@@ -837,6 +959,10 @@ function onPointerDown(event: PointerEvent) {
 
 function onPointerMove(event: PointerEvent) {
   if (viewMode !== "plan") return;
+  if (activePan) {
+    updatePlanPan(event);
+    return;
+  }
   const point = svgPoint(event);
   pointerPoint = point;
   if (activeTransform) {
@@ -853,6 +979,10 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onPointerUp(event: PointerEvent) {
+  if (activePan) {
+    endPlanPan(event);
+    return;
+  }
   if (activeTransform) {
     activeTransform = null;
     saveState();
@@ -977,7 +1107,7 @@ function updateSelected(patch: Partial<Feature>) {
 }
 
 function render() {
-  viewport.setAttribute("transform", `translate(${pan.x} ${pan.y}) scale(${zoom})`);
+  viewport.setAttribute("transform", `matrix(${zoom} 0 0 ${zoom} ${pan.x} ${pan.y})`);
   referenceImage.style.display = showReference && referenceImage.getAttribute("href") ? "block" : "none";
   referenceImage.style.opacity = String(referenceOpacity);
   stage.classList.toggle("hidden", viewMode !== "plan");
@@ -1487,6 +1617,35 @@ function rectPoints(x: number, y: number, width: number, height: number) {
     { x: x + width, y: y + height },
     { x, y: y + height }
   ];
+}
+
+function stageCenterPoint() {
+  const rect = stage.getBoundingClientRect();
+  return stagePointFromClient(rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+function stagePointFromClient(clientX: number, clientY: number): Point {
+  const point = stage.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  const matrix = stage.getScreenCTM()?.inverse();
+  const mapped = matrix ? point.matrixTransform(matrix) : point;
+  return { x: mapped.x, y: mapped.y };
+}
+
+function imagePointFromStagePoint(point: Point): Point {
+  return {
+    x: (point.x - pan.x) / zoom,
+    y: (point.y - pan.y) / zoom
+  };
+}
+
+function clientDeltaToStageDelta(dx: number, dy: number): Point {
+  const matrix = stage.getScreenCTM();
+  return {
+    x: matrix ? dx / matrix.a : dx,
+    y: matrix ? dy / matrix.d : dy
+  };
 }
 
 function svgPoint(event: PointerEvent): Point {

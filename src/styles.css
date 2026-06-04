@@ -261,6 +261,22 @@ textarea.compact {
   width: 100%;
   min-height: calc(100vh - 72px);
   background: #d8d1c5;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+#stage.panReady {
+  cursor: grab;
+}
+
+#stage.panning {
+  cursor: grabbing;
+}
+
+#stage.panning *,
+#stage.panReady * {
+  cursor: inherit;
 }
 
 #stage.hidden {
