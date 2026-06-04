@@ -132,6 +132,10 @@ textarea {
   resize: vertical;
 }
 
+textarea.compact {
+  min-height: 76px;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -152,12 +156,63 @@ textarea {
   background: #cfc8bc;
 }
 
+.viewSurface {
+  position: relative;
+  min-width: 1120px;
+  min-height: calc(100vh - 72px);
+}
+
 #stage {
   display: block;
   width: 100%;
-  min-width: 1120px;
   min-height: calc(100vh - 72px);
   background: #d8d1c5;
+}
+
+#stage.hidden {
+  display: none;
+}
+
+#modelStage {
+  display: none;
+  width: 100%;
+  min-height: calc(100vh - 72px);
+  background: #d8d1c5;
+}
+
+#modelStage.active {
+  display: block;
+}
+
+#modelStage canvas {
+  display: block;
+  width: 100%;
+  min-height: calc(100vh - 72px);
+}
+
+.modelHud {
+  display: none;
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: min(540px, calc(100% - 32px));
+  pointer-events: none;
+}
+
+.modelHud.active {
+  display: flex;
+}
+
+.modelHud span {
+  border: 1px solid rgba(7, 23, 29, 0.18);
+  border-radius: 6px;
+  background: rgba(247, 244, 238, 0.88);
+  color: #07171d;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
 }
 
 .terrain {
@@ -280,7 +335,13 @@ textarea {
     flex-direction: column;
   }
 
-  #stage {
+  .viewSurface {
     min-width: 900px;
+  }
+
+  #stage,
+  #modelStage,
+  #modelStage canvas {
+    min-height: 620px;
   }
 }
