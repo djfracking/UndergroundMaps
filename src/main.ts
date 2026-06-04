@@ -4,8 +4,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
 type FeatureKind = "surface" | "underground" | "road" | "fence" | "entrance" | "label";
 type Certainty = "confirmed" | "inferred" | "speculative";
-type Tool = "select" | "rect" | "ellipse" | "line" | "polygon" | "label";
+type Tool = "select" | "place" | "rect" | "ellipse" | "line" | "polygon" | "label";
 type ViewMode = "plan" | "model";
+type PlacementPreset = "surface" | "underground" | "entrance";
 
 type Point = { x: number; y: number };
 
@@ -18,6 +19,7 @@ type Feature = {
   points: Point[];
   height: number;
   depth: number;
+  rotation: number;
 };
 
 type ImagerySource = {
@@ -29,6 +31,12 @@ type ImagerySource = {
 
 const image = { width: 2709, height: 2320 };
 const worldScale = 0.18;
+
+const placementDefaults: Record<PlacementPreset, { kind: FeatureKind; label: string; width: number; length: number; height: number; depth: number }> = {
+  surface: { kind: "surface", label: "Surface building", width: 260, length: 150, height: 34, depth: 0 },
+  underground: { kind: "underground", label: "Underground volume", width: 430, length: 240, height: 58, depth: 80 },
+  entrance: { kind: "entrance", label: "Entrance", width: 44, length: 44, height: 24, depth: 0 }
+};
 
 let tool: Tool = "select";
 let kind: FeatureKind = "surface";
@@ -45,6 +53,20 @@ let zoom = 0.38;
 let pan = { x: 0, y: 0 };
 let referenceDataUrl = "";
 let terrainTexture: THREE.Texture | null = null;
+let placementPreset: PlacementPreset = "surface";
+let placementWidth = placementDefaults.surface.width;
+let placementLength = placementDefaults.surface.length;
+let placementRotation = 0;
+let pointerPoint: Point | null = null;
+let activeTransform: null | {
+  mode: "move" | "rotate";
+  id: string;
+  startPoint: Point;
+  initialPoints: Point[];
+  initialRotation: number;
+  center: Point;
+  startAngle: number;
+} = null;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
@@ -79,12 +101,37 @@ app.innerHTML = `
           <label>Tool</label>
           <div class="segmented" id="toolButtons">
             <button data-tool="select">Select</button>
+            <button data-tool="place">Place</button>
             <button data-tool="rect">Box</button>
             <button data-tool="ellipse">Oval</button>
             <button data-tool="line">Line</button>
             <button data-tool="polygon">Poly</button>
             <button data-tool="label">Text</button>
           </div>
+        </div>
+
+        <div class="group">
+          <label for="placementPreset">Placement stamp</label>
+          <select id="placementPreset">
+            <option value="surface">Surface building block</option>
+            <option value="underground">Underground hall block</option>
+            <option value="entrance">Entrance marker</option>
+          </select>
+          <div class="twoCol">
+            <label for="placementWidth">Width</label>
+            <input id="placementWidth" type="number" min="8" max="1200" step="2" />
+            <label for="placementLength">Length</label>
+            <input id="placementLength" type="number" min="8" max="1200" step="2" />
+          </div>
+          <label for="placementRotation">Rotation before placing</label>
+          <input id="placementRotation" type="range" min="-180" max="180" step="1" />
+          <div class="nudgeGrid">
+            <button data-rotate-stamp="-15">-15</button>
+            <button data-rotate-stamp="15">+15</button>
+            <button id="rotateStamp90">90</button>
+            <button id="resetStampRotation">Reset</button>
+          </div>
+          <p class="hint">Choose Place, set size and angle, then click the map. Zoom stays exactly where it is.</p>
         </div>
 
         <div class="group">
@@ -141,6 +188,20 @@ app.innerHTML = `
           <input id="heightInput" type="range" min="4" max="160" step="2" />
           <label for="depthInput">Depth below surface</label>
           <input id="depthInput" type="range" min="0" max="220" step="2" />
+          <div class="twoCol">
+            <label for="centerXInput">Center X</label>
+            <input id="centerXInput" type="number" step="1" />
+            <label for="centerYInput">Center Y</label>
+            <input id="centerYInput" type="number" step="1" />
+          </div>
+          <label for="rotationInput">Selected rotation</label>
+          <input id="rotationInput" type="range" min="-180" max="180" step="1" />
+          <div class="nudgeGrid">
+            <button data-nudge="0,-5">Up</button>
+            <button data-nudge="-5,0">Left</button>
+            <button data-nudge="5,0">Right</button>
+            <button data-nudge="0,5">Down</button>
+          </div>
           <textarea id="noteInput" placeholder="Evidence notes and citations"></textarea>
           <button id="deleteFeature">Delete</button>
         </div>
@@ -158,6 +219,7 @@ app.innerHTML = `
               <image id="referenceImage" width="${image.width}" height="${image.height}" preserveAspectRatio="none" />
               <rect class="terrain" width="${image.width}" height="${image.height}" />
               <g id="featureLayer"></g>
+              <g id="transformLayer"></g>
               <g id="draftLayer"></g>
             </g>
           </svg>
@@ -194,6 +256,7 @@ const stage = document.querySelector<SVGSVGElement>("#stage")!;
 const viewport = document.querySelector<SVGGElement>("#viewport")!;
 const referenceImage = document.querySelector<SVGImageElement>("#referenceImage")!;
 const featureLayer = document.querySelector<SVGGElement>("#featureLayer")!;
+const transformLayer = document.querySelector<SVGGElement>("#transformLayer")!;
 const draftLayer = document.querySelector<SVGGElement>("#draftLayer")!;
 const modelStage = document.querySelector<HTMLDivElement>("#modelStage")!;
 
@@ -245,6 +308,49 @@ function bind() {
     if (!button) return;
     tool = button.dataset.tool as Tool;
     draft = [];
+    if (tool === "place") viewMode = "plan";
+    render();
+  });
+
+  document.querySelector<HTMLSelectElement>("#placementPreset")!.addEventListener("change", (event) => {
+    placementPreset = (event.target as HTMLSelectElement).value as PlacementPreset;
+    const preset = placementDefaults[placementPreset];
+    placementWidth = preset.width;
+    placementLength = preset.length;
+    kind = preset.kind;
+    document.querySelector<HTMLSelectElement>("#kind")!.value = kind;
+    render();
+  });
+
+  document.querySelector<HTMLInputElement>("#placementWidth")!.addEventListener("input", (event) => {
+    placementWidth = Number((event.target as HTMLInputElement).value);
+    renderDraft();
+  });
+
+  document.querySelector<HTMLInputElement>("#placementLength")!.addEventListener("input", (event) => {
+    placementLength = Number((event.target as HTMLInputElement).value);
+    renderDraft();
+  });
+
+  document.querySelector<HTMLInputElement>("#placementRotation")!.addEventListener("input", (event) => {
+    placementRotation = Number((event.target as HTMLInputElement).value);
+    renderDraft();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-rotate-stamp]").forEach((button) => {
+    button.addEventListener("click", () => {
+      placementRotation = normalizeDegrees(placementRotation + Number(button.dataset.rotateStamp));
+      render();
+    });
+  });
+
+  document.querySelector("#rotateStamp90")!.addEventListener("click", () => {
+    placementRotation = normalizeDegrees(placementRotation + 90);
+    render();
+  });
+
+  document.querySelector("#resetStampRotation")!.addEventListener("click", () => {
+    placementRotation = 0;
     render();
   });
 
@@ -287,6 +393,31 @@ function bind() {
     updateSelected({ depth: Number((event.target as HTMLInputElement).value) });
   });
 
+  document.querySelector<HTMLInputElement>("#centerXInput")!.addEventListener("change", (event) => {
+    const selected = selectedFeature();
+    if (!selected) return;
+    const current = centroid(selected.points);
+    moveSelected(Number((event.target as HTMLInputElement).value) - current.x, 0);
+  });
+
+  document.querySelector<HTMLInputElement>("#centerYInput")!.addEventListener("change", (event) => {
+    const selected = selectedFeature();
+    if (!selected) return;
+    const current = centroid(selected.points);
+    moveSelected(0, Number((event.target as HTMLInputElement).value) - current.y);
+  });
+
+  document.querySelector<HTMLInputElement>("#rotationInput")!.addEventListener("input", (event) => {
+    rotateSelectedTo(Number((event.target as HTMLInputElement).value));
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-nudge]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [dx, dy] = (button.dataset.nudge ?? "0,0").split(",").map(Number);
+      moveSelected(dx, dy);
+    });
+  });
+
   document.querySelector<HTMLTextAreaElement>("#noteInput")!.addEventListener("input", (event) => {
     updateSelected({ note: (event.target as HTMLTextAreaElement).value });
   });
@@ -325,6 +456,11 @@ function bind() {
   stage.addEventListener("pointerdown", onPointerDown);
   stage.addEventListener("pointermove", onPointerMove);
   stage.addEventListener("pointerup", onPointerUp);
+  stage.addEventListener("pointerleave", () => {
+    if (activeTransform) return;
+    pointerPoint = null;
+    renderDraft();
+  });
   stage.addEventListener("dblclick", finishPolygon);
   window.addEventListener("resize", resizeModel);
 
@@ -339,9 +475,42 @@ function bind() {
 function onPointerDown(event: PointerEvent) {
   if (viewMode !== "plan") return;
   const point = svgPoint(event);
+  pointerPoint = point;
+  if (tool === "place") {
+    createPlacementFeature(point);
+    return;
+  }
   if (tool === "select") {
+    const handle = (event.target as Element).closest<SVGElement>("[data-transform]");
+    const feature = selectedFeature();
+    if (handle && feature) {
+      const center = centroid(feature.points);
+      activeTransform = {
+        mode: handle.dataset.transform === "rotate" ? "rotate" : "move",
+        id: feature.id,
+        startPoint: point,
+        initialPoints: clonePoints(feature.points),
+        initialRotation: feature.rotation,
+        center,
+        startAngle: angleBetween(center, point)
+      };
+      event.preventDefault();
+      return;
+    }
     const node = (event.target as Element).closest<SVGElement>("[data-id]");
     selectedId = node?.dataset.id ?? "";
+    const selected = selectedFeature();
+    if (selected) {
+      activeTransform = {
+        mode: "move",
+        id: selected.id,
+        startPoint: point,
+        initialPoints: clonePoints(selected.points),
+        initialRotation: selected.rotation,
+        center: centroid(selected.points),
+        startAngle: 0
+      };
+    }
     render();
     return;
   }
@@ -358,13 +527,29 @@ function onPointerDown(event: PointerEvent) {
 }
 
 function onPointerMove(event: PointerEvent) {
-  if (!pointerStart || viewMode !== "plan") return;
+  if (viewMode !== "plan") return;
   const point = svgPoint(event);
+  pointerPoint = point;
+  if (activeTransform) {
+    updateActiveTransform(point);
+    return;
+  }
+  if (tool === "place") {
+    renderDraft();
+    return;
+  }
+  if (!pointerStart) return;
   draft = shapeFromDrag(pointerStart, point, tool);
   renderDraft();
 }
 
 function onPointerUp(event: PointerEvent) {
+  if (activeTransform) {
+    activeTransform = null;
+    saveState();
+    render();
+    return;
+  }
   if (!pointerStart || viewMode !== "plan") return;
   const point = svgPoint(event);
   const points = shapeFromDrag(pointerStart, point, tool);
@@ -390,10 +575,78 @@ function createFeature(points: Point[], featureKind: FeatureKind, label: string)
     note: "",
     points,
     height: defaultHeight(featureKind),
-    depth: defaultDepth(featureKind)
+    depth: defaultDepth(featureKind),
+    rotation: 0
   };
   features.push(feature);
   selectedId = feature.id;
+  saveState();
+  render();
+}
+
+function createPlacementFeature(center: Point) {
+  const preset = placementDefaults[placementPreset];
+  const points = preset.kind === "entrance" ? [center] : stampPoints(center, placementWidth, placementLength, placementRotation);
+  const feature: Feature = {
+    id: crypto.randomUUID(),
+    kind: preset.kind,
+    certainty,
+    label: preset.label,
+    note: "",
+    points,
+    height: preset.height,
+    depth: preset.depth,
+    rotation: placementRotation
+  };
+  features.push(feature);
+  selectedId = feature.id;
+  kind = feature.kind;
+  saveState();
+  render();
+}
+
+function updateActiveTransform(point: Point) {
+  if (!activeTransform) return;
+  const feature = features.find((candidate) => candidate.id === activeTransform?.id);
+  if (!feature) return;
+
+  if (activeTransform.mode === "move") {
+    const dx = point.x - activeTransform.startPoint.x;
+    const dy = point.y - activeTransform.startPoint.y;
+    feature.points = activeTransform.initialPoints.map((initial) => ({ x: initial.x + dx, y: initial.y + dy }));
+  } else {
+    const delta = angleBetween(activeTransform.center, point) - activeTransform.startAngle;
+    feature.points = rotatePoints(activeTransform.initialPoints, activeTransform.center, delta);
+    feature.rotation = normalizeDegrees(activeTransform.initialRotation + radiansToDegrees(delta));
+  }
+
+  renderFeatures();
+  renderTransform();
+  renderList();
+  renderInspector();
+  renderModel();
+}
+
+function moveSelected(dx: number, dy: number) {
+  if (!selectedId || (!dx && !dy)) return;
+  features = features.map((feature) => {
+    if (feature.id !== selectedId) return feature;
+    return { ...feature, points: feature.points.map((point) => ({ x: point.x + dx, y: point.y + dy })) };
+  });
+  saveState();
+  render();
+}
+
+function rotateSelectedTo(rotation: number) {
+  const feature = selectedFeature();
+  if (!feature) return;
+  const nextRotation = normalizeDegrees(rotation);
+  const delta = degreesToRadians(nextRotation - feature.rotation);
+  const center = centroid(feature.points);
+  features = features.map((candidate) => {
+    if (candidate.id !== feature.id) return candidate;
+    return { ...candidate, points: rotatePoints(candidate.points, center, delta), rotation: nextRotation };
+  });
   saveState();
   render();
 }
@@ -414,6 +667,7 @@ function render() {
   document.querySelector(".modelHud")!.classList.toggle("active", viewMode === "model");
   renderToolbar();
   renderFeatures();
+  renderTransform();
   renderDraft();
   renderList();
   renderInspector();
@@ -433,7 +687,33 @@ function renderFeatures() {
   featureLayer.innerHTML = features.map((feature) => featureSvg(feature, false)).join("");
 }
 
+function renderTransform() {
+  const selected = selectedFeature();
+  if (!selected || viewMode !== "plan") {
+    transformLayer.innerHTML = "";
+    return;
+  }
+  const center = centroid(selected.points);
+  const radius = Math.max(85, Math.sqrt(areaBounds(selected.points)) * 0.7);
+  const handleAngle = degreesToRadians(selected.rotation - 90);
+  const rotateHandle = { x: center.x + Math.cos(handleAngle) * radius, y: center.y + Math.sin(handleAngle) * radius };
+  const closeOutline = selected.kind !== "road" && selected.kind !== "fence";
+  transformLayer.innerHTML = `
+    <g class="transformBox">
+      <path d="${pathData(selected.points, closeOutline)}" />
+      <line x1="${center.x}" y1="${center.y}" x2="${rotateHandle.x}" y2="${rotateHandle.y}" />
+      <circle data-transform="move" cx="${center.x}" cy="${center.y}" r="18" />
+      <circle data-transform="rotate" class="rotateHandle" cx="${rotateHandle.x}" cy="${rotateHandle.y}" r="24" />
+    </g>
+  `;
+}
+
 function renderDraft() {
+  if (tool === "place" && pointerPoint && viewMode === "plan") {
+    const ghost = stampPoints(pointerPoint, placementWidth, placementLength, placementRotation);
+    draftLayer.innerHTML = `<path class="draft stampGhost" d="${pathData(ghost, placementPreset !== "entrance")}" />`;
+    return;
+  }
   draftLayer.innerHTML = draft.length ? `<path class="draft" d="${pathData(draft, tool !== "line")}" />` : "";
 }
 
@@ -459,8 +739,15 @@ function renderInspector() {
   document.querySelector<HTMLTextAreaElement>("#noteInput")!.value = selected?.note ?? "";
   document.querySelector<HTMLInputElement>("#heightInput")!.value = String(selected?.height ?? defaultHeight(kind));
   document.querySelector<HTMLInputElement>("#depthInput")!.value = String(selected?.depth ?? defaultDepth(kind));
+  document.querySelector<HTMLInputElement>("#centerXInput")!.value = selected ? String(Math.round(centroid(selected.points).x)) : "";
+  document.querySelector<HTMLInputElement>("#centerYInput")!.value = selected ? String(Math.round(centroid(selected.points).y)) : "";
+  document.querySelector<HTMLInputElement>("#rotationInput")!.value = String(selected?.rotation ?? placementRotation);
   document.querySelector<HTMLSelectElement>("#kind")!.value = selected?.kind ?? kind;
   document.querySelector<HTMLSelectElement>("#certainty")!.value = selected?.certainty ?? certainty;
+  document.querySelector<HTMLSelectElement>("#placementPreset")!.value = placementPreset;
+  document.querySelector<HTMLInputElement>("#placementWidth")!.value = String(Math.round(placementWidth));
+  document.querySelector<HTMLInputElement>("#placementLength")!.value = String(Math.round(placementLength));
+  document.querySelector<HTMLInputElement>("#placementRotation")!.value = String(placementRotation);
   document.querySelector<HTMLInputElement>("#imageryUrl")!.value = imagerySource.url;
   document.querySelector<HTMLInputElement>("#imageryCredit")!.value = imagerySource.credit;
   document.querySelector<HTMLTextAreaElement>("#imageryLicense")!.value = imagerySource.license;
@@ -718,6 +1005,73 @@ function shapeFromDrag(start: Point, end: Point, activeTool: Tool): Point[] {
   ];
 }
 
+function stampPoints(center: Point, width: number, length: number, rotation: number) {
+  const halfWidth = width / 2;
+  const halfLength = length / 2;
+  const base = [
+    { x: center.x - halfWidth, y: center.y - halfLength },
+    { x: center.x + halfWidth, y: center.y - halfLength },
+    { x: center.x + halfWidth, y: center.y + halfLength },
+    { x: center.x - halfWidth, y: center.y + halfLength }
+  ];
+  return rotatePoints(base, center, degreesToRadians(rotation));
+}
+
+function selectedFeature() {
+  return features.find((feature) => feature.id === selectedId);
+}
+
+function clonePoints(points: Point[]) {
+  return points.map((point) => ({ ...point }));
+}
+
+function rotatePoints(points: Point[], center: Point, radians: number) {
+  return points.map((point) => rotatedPoint(point, center, radians));
+}
+
+function rotatedPoint(point: Point, center: Point, radians: number) {
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos
+  };
+}
+
+function angleBetween(center: Point, point: Point) {
+  return Math.atan2(point.y - center.y, point.x - center.x);
+}
+
+function degreesToRadians(degrees: number) {
+  return (degrees * Math.PI) / 180;
+}
+
+function radiansToDegrees(radians: number) {
+  return (radians * 180) / Math.PI;
+}
+
+function normalizeDegrees(degrees: number) {
+  let normalized = ((degrees + 180) % 360) - 180;
+  if (normalized < -180) normalized += 360;
+  return Math.round(normalized);
+}
+
+function areaBounds(points: Point[]) {
+  const box = bounds(points);
+  return Math.max(1, (box.maxX - box.minX) * (box.maxY - box.minY));
+}
+
+function bounds(points: Point[]) {
+  return points.reduce((box, point) => ({
+    minX: Math.min(box.minX, point.x),
+    minY: Math.min(box.minY, point.y),
+    maxX: Math.max(box.maxX, point.x),
+    maxY: Math.max(box.maxY, point.y)
+  }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+}
+
 function seedNatanzLayout() {
   const starters: Array<Omit<Feature, "id">> = [
     {
@@ -727,6 +1081,7 @@ function seedNatanzLayout() {
       note: "Starter footprint for QA against public references.",
       height: 36,
       depth: 0,
+      rotation: 0,
       points: rectPoints(620, 690, 720, 570)
     },
     {
@@ -736,6 +1091,7 @@ function seedNatanzLayout() {
       note: "Approximate inferred underground volume. Adjust after source review.",
       height: 62,
       depth: 88,
+      rotation: 0,
       points: rectPoints(1380, 860, 430, 330)
     },
     {
@@ -745,7 +1101,8 @@ function seedNatanzLayout() {
       note: "Speculative starter volume for QA.",
       height: 46,
       depth: 70,
-      points: rectPoints(1510, 1225, 410, 260)
+      rotation: -18,
+      points: stampPoints({ x: 1715, y: 1355 }, 410, 260, -18)
     },
     {
       kind: "entrance",
@@ -754,6 +1111,7 @@ function seedNatanzLayout() {
       note: "Starter portal marker.",
       height: 28,
       depth: 0,
+      rotation: 0,
       points: [{ x: 1410, y: 1530 }]
     },
     {
@@ -763,6 +1121,7 @@ function seedNatanzLayout() {
       note: "Starter service path.",
       height: 8,
       depth: 0,
+      rotation: 0,
       points: [
         { x: 1260, y: 1545 },
         { x: 1470, y: 1510 },
@@ -867,7 +1226,8 @@ function normalizeFeature(raw: Partial<Feature>): Feature {
     note: raw.note ?? "",
     points: raw.points ?? [],
     height: raw.height ?? defaultHeight(normalizedKind),
-    depth: raw.depth ?? defaultDepth(normalizedKind)
+    depth: raw.depth ?? defaultDepth(normalizedKind),
+    rotation: raw.rotation ?? 0
   };
 }
 

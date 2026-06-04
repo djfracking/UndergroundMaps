@@ -115,6 +115,24 @@ label {
   gap: 6px;
 }
 
+.twoCol,
+.nudgeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.twoCol label {
+  align-self: center;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+}
+
+.nudgeGrid button {
+  min-width: 0;
+}
+
 select,
 input,
 textarea {
@@ -300,6 +318,45 @@ textarea.compact {
   stroke-width: 10px;
   stroke-dasharray: 20 12;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.stampGhost {
+  fill: rgba(7, 23, 29, 0.12);
+  stroke: #07171d;
+  stroke-dasharray: 12 10;
+}
+
+.transformBox {
+  pointer-events: none;
+}
+
+.transformBox path {
+  fill: none;
+  stroke: #f4c542;
+  stroke-width: 8px;
+  stroke-dasharray: 18 12;
+  vector-effect: non-scaling-stroke;
+}
+
+.transformBox line {
+  stroke: #f4c542;
+  stroke-width: 6px;
+  vector-effect: non-scaling-stroke;
+}
+
+.transformBox circle {
+  pointer-events: auto;
+  cursor: move;
+  fill: #f4c542;
+  stroke: #07171d;
+  stroke-width: 6px;
+  vector-effect: non-scaling-stroke;
+}
+
+.transformBox .rotateHandle {
+  cursor: grab;
+  fill: #f7f4ee;
 }
 
 .featureList {

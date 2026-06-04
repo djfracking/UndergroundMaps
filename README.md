@@ -11,6 +11,11 @@ include only author-drawn vector features, notes, and classifications.
 ## Current Features
 
 - 2D QA drawing tools for boxes, ovals, lines, polygons, labels, and entrances.
+- Photoshop-style placement stamp for pre-sized building, underground hall, and
+  entrance objects.
+- Live placement preview with rotation before committing a feature.
+- Selected-object transform controls for move, nudge, center coordinates, and
+  rotation.
 - Per-feature classifications for surface buildings, underground volumes, roads,
   fences, entrances, and labels.
 - Certainty tagging: confirmed, inferred, or speculative.
