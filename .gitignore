@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+firebase-debug.log
+public/assets/*.png
+public/assets/*.jpg
+public/assets/*.jpeg
+public/assets/*.tif
+public/assets/*.tiff
