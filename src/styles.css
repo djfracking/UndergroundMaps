@@ -200,7 +200,8 @@ button.active kbd {
 }
 
 .twoCol,
-.nudgeGrid {
+.nudgeGrid,
+.depthPresets {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
@@ -215,6 +216,17 @@ button.active kbd {
 
 .nudgeGrid button {
   min-width: 0;
+}
+
+.depthPresets {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.depthPresets button {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 6px;
+  font-size: 12px;
 }
 
 .referenceList {
@@ -702,6 +714,52 @@ textarea.compact {
   display: grid;
   gap: 8px;
   align-content: start;
+}
+
+.sourceList {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  overflow: auto;
+  min-height: 0;
+}
+
+.sourceItem {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c9c2b6;
+  border-radius: 6px;
+  background: rgba(251, 250, 246, 0.54);
+  padding: 8px;
+}
+
+.sourceItem strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.sourceItem p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.sourceItem a {
+  color: #12323a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sourceItem button {
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.sourcePanel {
+  flex: 0 1 190px;
+  min-height: 120px;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .featurePanel {

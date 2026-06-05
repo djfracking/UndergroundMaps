@@ -55,6 +55,14 @@ type ImagerySource = {
   referenceOnly: boolean;
 };
 
+type SourceReference = {
+  id: string;
+  title: string;
+  url: string;
+  summary: string;
+  citation: string;
+};
+
 type ReferenceLayer = {
   id: string;
   name: string;
@@ -179,6 +187,44 @@ const placementDefaults: Record<PlacementPreset, { kind: FeatureKind; label: str
   underground: { kind: "underground", label: "Underground volume", width: 430, length: 240, height: 58, depth: 80 },
   entrance: { kind: "entrance", label: "Entrance", width: 44, length: 44, height: 24, depth: 0 }
 };
+
+const sourceReferences: SourceReference[] = [
+  {
+    id: "isis-2026-entrances",
+    title: "ISIS 2026 Natanz entrance imagery",
+    url: "https://isis-online.org/isis-reports/damage-at-the-natanz-uranium-enrichment-plant",
+    summary: "High-resolution imagery discussion identifies two personnel entrance buildings and the vehicle entrance for the older underground FEP; 2003 construction imagery shows entrances relative to the large buried halls.",
+    citation: "Institute for Science and International Security, Damage at the Natanz Uranium Enrichment Plant, March 3, 2026."
+  },
+  {
+    id: "isis-2022-tunnel-depth",
+    title: "ISIS 2022 new tunnel depth estimate",
+    url: "https://isis-online.org/isis-reports/irans-natanz-tunnel-complex-deeper-larger-than-expected/",
+    summary: "Estimates the newer mountain tunnel complex depth from portal and ridge elevations; horizontal tunnels imply roughly 78 m or 145 m below the ridge, with about 110 m plausible if portal elevations meet.",
+    citation: "Institute for Science and International Security, Iran's Natanz Tunnel Complex: Deeper, Larger than Expected, January 13, 2022."
+  },
+  {
+    id: "isis-2021-tunnel-roads",
+    title: "ISIS 2021 tunnel portals and access roads",
+    url: "https://isis-online.org/isis-reports/detail/update-on-natanz-construction-progresses-towards-large-scale-tunnel-complex",
+    summary: "Public imagery report describes the new construction staging/support area and roads leading toward eastern and western tunnel entrance areas in the mountain south of the main Natanz site.",
+    citation: "Institute for Science and International Security, Update on Natanz: Construction Progresses Towards Large-scale Tunnel Complex, January 11, 2021."
+  },
+  {
+    id: "globalsecurity-fep-depth",
+    title: "GlobalSecurity Natanz FEP depth and overburden",
+    url: "https://www.globalsecurity.org/wmd/world/iran/natanz-fep.htm",
+    summary: "Describes the older FEP as two large underground halls built about 8 m deep, with concrete protection; also reports later hardening with reinforced concrete and about 75 ft of earth cover.",
+    citation: "GlobalSecurity.org, Natanz (Kashan) Fuel Enrichment Plant."
+  },
+  {
+    id: "iaea-2026-confirmation",
+    title: "IAEA confirmation via public reporting",
+    url: "https://www.nucnet.org/news/iaea-says-recent-damage-seen-to-natanz-entrance-buildings-no-radiological-impact-3-2-2026",
+    summary: "Public reporting of IAEA statement confirms satellite-imagery-based damage assessment at entrance buildings of the underground Natanz FEP, with no expected radiological consequence.",
+    citation: "NucNet, IAEA Says Recent Damage Seen To Natanz Entrance Buildings, March 2026."
+  }
+];
 
 let tool: Tool = "select";
 let kind: FeatureKind = "surface";
@@ -376,6 +422,11 @@ app.innerHTML = `
           <input id="heightInput" type="range" min="4" max="160" step="2" />
           <label for="depthInput">Depth below surface</label>
           <input id="depthInput" type="range" min="0" max="220" step="2" />
+          <div class="depthPresets">
+            <button data-depth-preset="fep-shallow" title="Older Natanz FEP reported shallow underground depth">FEP 8 m</button>
+            <button data-depth-preset="fep-cover" title="Older Natanz FEP reported hardened earth cover">Cover 23 m</button>
+            <button data-depth-preset="new-tunnel" title="Newer mountain tunnel complex inferred depth">Tunnel 110 m</button>
+          </div>
           <div class="twoCol">
             <label for="centerXInput">Center X</label>
             <input id="centerXInput" type="number" step="1" />
@@ -428,8 +479,13 @@ app.innerHTML = `
       <aside class="panel library">
         <div class="group">
           <label>Starter</label>
-          <button id="seedNatanz">Add Natanz starter layout</button>
+          <button id="seedNatanz">Replace with sourced Natanz starter</button>
+          <button id="addInfrastructure">Add roads and fences</button>
           <p class="hint">Approximate blocks for QA. Replace or adjust each feature against your evidence.</p>
+        </div>
+        <div class="group sourcePanel">
+          <label>Source presets</label>
+          <div id="sourceList" class="sourceList"></div>
         </div>
         <div class="group featurePanel">
           <label>Features</label>
@@ -720,6 +776,12 @@ function bind() {
     });
   });
 
+  document.querySelectorAll<HTMLButtonElement>("[data-depth-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyDepthPreset(button.dataset.depthPreset ?? "");
+    });
+  });
+
   document.querySelector<HTMLTextAreaElement>("#noteInput")!.addEventListener("input", (event) => {
     updateSelected({ note: (event.target as HTMLTextAreaElement).value });
   });
@@ -749,6 +811,7 @@ function bind() {
   document.querySelector("#deleteFeature")!.addEventListener("click", deleteSelectedFeature);
 
   document.querySelector("#seedNatanz")!.addEventListener("click", seedNatanzLayout);
+  document.querySelector("#addInfrastructure")!.addEventListener("click", addRoadsAndFences);
 
   stage.addEventListener("pointerdown", onPointerDown);
   stage.addEventListener("pointermove", onPointerMove);
@@ -1573,12 +1636,80 @@ function rotateSelectedTo(rotation: number) {
   render();
 }
 
+function applyDepthPreset(presetId: string) {
+  const selected = selectedFeature();
+  if (!selected) return;
+  const presets: Record<string, Partial<Feature> & { sourceId: string; note: string }> = {
+    "fep-shallow": {
+      kind: "underground",
+      certainty: "inferred",
+      label: selected.label || "FEP underground hall",
+      depth: 8,
+      height: Math.max(selected.height, 34),
+      sourceId: "globalsecurity-fep-depth",
+      note: "Depth preset: older Natanz FEP reported as about 8 m underground; use for the original buried enrichment halls, not the newer mountain tunnel complex."
+    },
+    "fep-cover": {
+      kind: "underground",
+      certainty: "inferred",
+      label: selected.label || "Hardened FEP hall",
+      depth: 23,
+      height: Math.max(selected.height, 34),
+      sourceId: "globalsecurity-fep-depth",
+      note: "Depth preset: GlobalSecurity reports later hardening with reinforced concrete and about 75 ft / 23 m of earth cover; treat as cover/overburden, not exact floor elevation."
+    },
+    "new-tunnel": {
+      kind: "underground",
+      certainty: "speculative",
+      label: selected.label || "New mountain tunnel hall",
+      depth: 110,
+      height: Math.max(selected.height, 58),
+      sourceId: "isis-2022-tunnel-depth",
+      note: "Depth preset: newer mountain tunnel complex; ISIS estimates possible burial around 78-145 m from portal/ridge geometry, with roughly 110 m plausible if tunnel elevations meet."
+    }
+  };
+  const preset = presets[presetId];
+  if (!preset) return;
+  appendFeatureEvidence(selected.id, [preset.note, sourceNote(preset.sourceId)].filter(Boolean).join("\n"));
+  updateSelected({
+    kind: preset.kind,
+    certainty: preset.certainty,
+    label: preset.label,
+    depth: preset.depth,
+    height: preset.height
+  });
+}
+
 function updateSelected(patch: Partial<Feature>) {
   if (!selectedId) return;
   pushHistory();
   features = features.map((feature) => feature.id === selectedId ? normalizeFeature({ ...feature, ...patch }) : feature);
   saveState();
   render();
+}
+
+function appendSourceToSelected(sourceId: string) {
+  if (!selectedId) return;
+  appendFeatureEvidence(selectedId, sourceNote(sourceId));
+}
+
+function appendFeatureEvidence(featureId: string, note: string) {
+  const trimmed = note.trim();
+  if (!trimmed) return;
+  pushHistory();
+  features = features.map((feature) => {
+    if (feature.id !== featureId) return feature;
+    const nextNote = feature.note.trim() ? `${feature.note.trim()}\n\n${trimmed}` : trimmed;
+    return { ...feature, note: nextNote };
+  });
+  saveState();
+  render();
+}
+
+function sourceNote(sourceId: string) {
+  const source = sourceReferences.find((candidate) => candidate.id === sourceId);
+  if (!source) return "";
+  return `Source: ${source.citation}\n${source.summary}\n${source.url}`;
 }
 
 function render() {
@@ -1593,6 +1724,7 @@ function render() {
   renderTransform();
   renderDraft();
   renderList();
+  renderSourceList();
   renderReferenceList();
   renderReferenceInspector();
   renderInspector();
@@ -1854,6 +1986,21 @@ function renderList() {
   });
 }
 
+function renderSourceList() {
+  const list = document.querySelector<HTMLDivElement>("#sourceList")!;
+  list.innerHTML = sourceReferences.map((source) => `
+    <div class="sourceItem">
+      <strong>${escapeHtml(source.title)}</strong>
+      <p>${escapeHtml(source.summary)}</p>
+      <button data-source-append="${source.id}" ${selectedId ? "" : "disabled"}>Add to selected notes</button>
+      <a href="${source.url}" target="_blank" rel="noreferrer">Open source</a>
+    </div>
+  `).join("");
+  list.querySelectorAll<HTMLButtonElement>("[data-source-append]").forEach((button) => {
+    button.addEventListener("click", () => appendSourceToSelected(button.dataset.sourceAppend ?? ""));
+  });
+}
+
 function renderInspector() {
   const selected = features.find((feature) => feature.id === selectedId);
   document.querySelector<HTMLInputElement>("#labelInput")!.value = selected?.label ?? "";
@@ -2008,7 +2155,7 @@ function cleanStyles() {
 }
 
 function exportJson() {
-  download("undergroundmaps-natanz.json", JSON.stringify({ project: "UndergroundMaps", workspace: "Natanz", image, imagerySource, features }, null, 2), "application/json");
+  download("undergroundmaps-natanz.json", JSON.stringify({ project: "UndergroundMaps", workspace: "Natanz", image, imagerySource, sourceReferences, features }, null, 2), "application/json");
 }
 
 function importJson(event: Event) {
@@ -2494,68 +2641,195 @@ function bounds(points: Point[]) {
 
 function seedNatanzLayout() {
   pushHistory();
-  const starters: Array<Omit<Feature, "id">> = [
-    {
-      kind: "surface",
-      certainty: "inferred",
-      label: "Centrifuge assembly buildings",
-      note: "Starter footprint for QA against public references.",
-      height: 36,
-      depth: 0,
-      rotation: 0,
-      points: rectPoints(620, 690, 720, 570)
-    },
-    {
-      kind: "underground",
-      certainty: "inferred",
-      label: "Underground enrichment halls",
-      note: "Approximate inferred underground volume. Adjust after source review.",
-      height: 62,
-      depth: 88,
-      rotation: 0,
-      points: rectPoints(1380, 860, 430, 330)
-    },
-    {
-      kind: "underground",
-      certainty: "speculative",
-      label: "Buried support volume",
-      note: "Speculative starter volume for QA.",
-      height: 46,
-      depth: 70,
-      rotation: -18,
-      points: stampPoints({ x: 1715, y: 1355 }, 410, 260, -18)
-    },
-    {
-      kind: "entrance",
-      certainty: "inferred",
-      label: "Underground entrance",
-      note: "Starter portal marker.",
-      height: 28,
-      depth: 0,
-      rotation: 0,
-      points: [{ x: 1410, y: 1530 }]
-    },
-    {
-      kind: "road",
-      certainty: "inferred",
-      label: "Service road",
-      note: "Starter service path.",
-      height: 8,
-      depth: 0,
-      rotation: 0,
-      points: [
-        { x: 1260, y: 1545 },
-        { x: 1470, y: 1510 },
-        { x: 1780, y: 1450 },
-        { x: 2170, y: 1390 }
-      ]
-    }
-  ];
+  const starters = [...natanzBaseFeatures(), ...natanzInfrastructureFeatures()];
   features = starters.map((feature) => ({ ...feature, id: crypto.randomUUID() }));
   selectedId = features[0]?.id ?? "";
   focusedReferenceId = "";
   saveState();
   render();
+}
+
+function addRoadsAndFences() {
+  pushHistory();
+  const newFeatures = natanzInfrastructureFeatures().map((feature) => ({ ...feature, id: crypto.randomUUID() }));
+  features = [...features, ...newFeatures];
+  selectedId = newFeatures[0]?.id ?? selectedId;
+  focusedReferenceId = "";
+  saveState();
+  render();
+}
+
+function natanzBaseFeatures(): Array<Omit<Feature, "id">> {
+  return [
+    {
+      kind: "surface",
+      certainty: "inferred",
+      label: "Surface support and assembly area",
+      note: `Starter footprint for surface buildings visible in reference imagery.\n\n${sourceNote("isis-2026-entrances")}`,
+      height: 36,
+      depth: 0,
+      rotation: 0,
+      points: stampPoints({ x: 850, y: 1060 }, 520, 360, -4)
+    },
+    {
+      kind: "underground",
+      certainty: "inferred",
+      label: "FEP hall A, shallow hardened",
+      note: `Older Natanz FEP hall. Treat 8 m as reported construction depth and about 23 m as reported later overburden/hardening; QA footprint against imagery.\n\n${sourceNote("globalsecurity-fep-depth")}`,
+      height: 38,
+      depth: 23,
+      rotation: 0,
+      points: rectPoints(1110, 1080, 470, 310)
+    },
+    {
+      kind: "underground",
+      certainty: "inferred",
+      label: "FEP hall B, shallow hardened",
+      note: `Older Natanz FEP hall. Treat 8 m as reported construction depth and about 23 m as reported later overburden/hardening; QA footprint against imagery.\n\n${sourceNote("globalsecurity-fep-depth")}`,
+      height: 38,
+      depth: 23,
+      rotation: 0,
+      points: rectPoints(1630, 1080, 470, 310)
+    },
+    {
+      kind: "entrance",
+      certainty: "inferred",
+      label: "Vehicle entrance ramp",
+      note: `Vehicle entrance to the older underground FEP. Position is a QA starter only; adjust to reference imagery.\n\n${sourceNote("isis-2026-entrances")}`,
+      height: 28,
+      depth: 0,
+      rotation: 0,
+      points: [{ x: 1410, y: 1460 }]
+    },
+    {
+      kind: "entrance",
+      certainty: "inferred",
+      label: "Personnel entrances",
+      note: `Two personnel entrance buildings are discussed in public imagery analysis; use this as a marker cluster and split into separate markers if needed.\n\n${sourceNote("isis-2026-entrances")}`,
+      height: 24,
+      depth: 0,
+      rotation: 0,
+      points: [{ x: 960, y: 1385 }]
+    },
+    {
+      kind: "underground",
+      certainty: "speculative",
+      label: "New mountain tunnel complex",
+      note: `Speculative schematic placeholder for the newer mountain tunnel complex south of the main site. ISIS estimates possible burial around 78-145 m under the ridge, with about 110 m plausible if tunnel elevations meet.\n\n${sourceNote("isis-2022-tunnel-depth")}`,
+      height: 64,
+      depth: 110,
+      rotation: -16,
+      points: stampPoints({ x: 2050, y: 1650 }, 520, 320, -16)
+    },
+    {
+      kind: "entrance",
+      certainty: "speculative",
+      label: "New tunnel portals",
+      note: `Marker for newer tunnel portal areas described in public imagery reporting. Split into eastern/western portals after QA.\n\n${sourceNote("isis-2021-tunnel-roads")}`,
+      height: 26,
+      depth: 0,
+      rotation: 0,
+      points: [{ x: 2190, y: 1395 }]
+    }
+  ];
+}
+
+function natanzInfrastructureFeatures(): Array<Omit<Feature, "id">> {
+  return [
+    {
+      kind: "fence",
+      certainty: "inferred",
+      label: "",
+      note: "Approximate main site perimeter/security fence traced from visible reference imagery. Keep as a schematic boundary, not a surveyed line.",
+      height: 10,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 330, y: 500 },
+        { x: 2315, y: 455 },
+        { x: 2495, y: 1945 },
+        { x: 520, y: 2185 },
+        { x: 330, y: 500 }
+      ]
+    },
+    {
+      kind: "fence",
+      certainty: "speculative",
+      label: "",
+      note: `Approximate construction/security boundary for newer tunnel work area. Use only after QA against imagery.\n\n${sourceNote("isis-2021-tunnel-roads")}`,
+      height: 10,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 1810, y: 1200 },
+        { x: 2435, y: 1210 },
+        { x: 2550, y: 1810 },
+        { x: 1930, y: 1950 },
+        { x: 1810, y: 1200 }
+      ]
+    },
+    {
+      kind: "road",
+      certainty: "inferred",
+      label: "",
+      note: "Main internal service road spine. Trace and simplify against the active reference layer.",
+      height: 8,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 480, y: 960 },
+        { x: 790, y: 1110 },
+        { x: 1060, y: 1260 },
+        { x: 1395, y: 1435 },
+        { x: 1730, y: 1510 }
+      ]
+    },
+    {
+      kind: "road",
+      certainty: "inferred",
+      label: "",
+      note: `Vehicle access route toward the older FEP entrance area; public imagery reporting identifies the vehicle entrance as a distinct access point.\n\n${sourceNote("isis-2026-entrances")}`,
+      height: 8,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 1120, y: 1500 },
+        { x: 1280, y: 1475 },
+        { x: 1410, y: 1460 },
+        { x: 1565, y: 1495 }
+      ]
+    },
+    {
+      kind: "road",
+      certainty: "speculative",
+      label: "",
+      note: `Approximate route from the support/staging area toward newer tunnel portal areas. ISIS describes roads leading to eastern and western tunnel entrance areas.\n\n${sourceNote("isis-2021-tunnel-roads")}`,
+      height: 8,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 1740, y: 1280 },
+        { x: 1945, y: 1355 },
+        { x: 2190, y: 1395 },
+        { x: 2390, y: 1485 }
+      ]
+    },
+    {
+      kind: "road",
+      certainty: "speculative",
+      label: "",
+      note: `Approximate western construction/access road for the newer tunnel area. QA against imagery before publication.\n\n${sourceNote("isis-2021-tunnel-roads")}`,
+      height: 8,
+      depth: 0,
+      rotation: 0,
+      points: [
+        { x: 1690, y: 1600 },
+        { x: 1880, y: 1680 },
+        { x: 2060, y: 1775 },
+        { x: 2260, y: 1900 }
+      ]
+    }
+  ];
 }
 
 function rectPoints(x: number, y: number, width: number, height: number) {
