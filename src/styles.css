@@ -89,9 +89,11 @@ kbd {
 }
 
 .shell {
+  height: 100vh;
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr;
+  overflow: hidden;
 }
 
 .topbar {
@@ -131,18 +133,24 @@ p {
   min-height: 0;
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 280px;
+  overflow: hidden;
 }
 
 .panel {
   background: #ebe7de;
   border-right: 1px solid #c8c2b6;
   padding: 14px;
+  min-height: 0;
   overflow: auto;
 }
 
 .library {
   border-left: 1px solid #c8c2b6;
   border-right: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .group {
@@ -212,11 +220,12 @@ button.active kbd {
 .referenceList {
   display: grid;
   gap: 6px;
+  align-content: start;
 }
 
 .referenceItem {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   gap: 6px;
   align-items: stretch;
   border: 1px solid #c9c2b6;
@@ -230,7 +239,31 @@ button.active kbd {
   background: #f7f4ee;
 }
 
-.referenceItem > button:first-child {
+.referenceItem.muted {
+  opacity: 0.58;
+}
+
+.referenceItem.dragging {
+  opacity: 0.4;
+}
+
+.referenceItem.dropTarget {
+  border-color: #f4c542;
+  box-shadow: inset 0 0 0 1px #f4c542;
+}
+
+.referenceItem .layerIcon,
+.referenceItem .layerActions button,
+.layerToolbar button:has([data-icon]),
+.nudgeGrid button:has([data-icon]) {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  width: 34px;
+  padding: 0;
+}
+
+.referenceItem .layerSelect {
   display: grid;
   justify-items: start;
   gap: 2px;
@@ -249,6 +282,64 @@ button.active kbd {
 .referenceItem small {
   color: inherit;
   opacity: 0.68;
+}
+
+.layerActions {
+  display: grid;
+  grid-template-columns: repeat(3, 30px);
+  gap: 4px;
+  align-content: center;
+}
+
+.layerActions button {
+  width: 30px;
+  min-height: 30px;
+}
+
+.layersPanel {
+  order: 10;
+  flex: 1 1 280px;
+  min-height: 230px;
+  margin-top: 0;
+  padding-top: 14px;
+  background: #ebe7de;
+  overflow: auto;
+  border-bottom: 0;
+}
+
+.panelTitle,
+.layerToolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.panelTitle {
+  justify-content: space-between;
+}
+
+.panelTitle [data-icon] {
+  display: grid;
+  place-items: center;
+  color: #4b5555;
+}
+
+.layerToolbar {
+  flex-wrap: wrap;
+}
+
+.layerToolbar button {
+  min-height: 32px;
+}
+
+.referenceInspector {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.referenceInspector.empty {
+  display: none;
 }
 
 .miniToggle {
@@ -385,6 +476,10 @@ textarea.compact {
   fill: #e7e0d4;
   opacity: 0.18;
   pointer-events: none;
+}
+
+.referenceImage {
+  cursor: move;
 }
 
 .feature {
@@ -543,9 +638,94 @@ textarea.compact {
   cursor: nesw-resize;
 }
 
+.referenceTransformBox {
+  pointer-events: none;
+}
+
+.referenceTransformBox path {
+  fill: none;
+  stroke: #f4c542;
+  stroke-width: 6px;
+  stroke-dasharray: 14 10;
+  vector-effect: non-scaling-stroke;
+}
+
+.referenceTransformBox line {
+  stroke: #f4c542;
+  stroke-width: 5px;
+  vector-effect: non-scaling-stroke;
+}
+
+.referenceTransformBox circle {
+  pointer-events: auto;
+  cursor: move;
+  fill: #f4c542;
+  stroke: #07171d;
+  stroke-width: 5px;
+  vector-effect: non-scaling-stroke;
+}
+
+.referenceTransformBox .rotateHandle {
+  cursor: grab;
+  fill: #f7f4ee;
+}
+
+.referenceTransformBox .referenceScaleHandle {
+  pointer-events: auto;
+  fill: #f7f4ee;
+  stroke: #07171d;
+  stroke-width: 4px;
+  vector-effect: non-scaling-stroke;
+}
+
+.referenceTransformBox .referenceScaleHandle.n,
+.referenceTransformBox .referenceScaleHandle.s {
+  cursor: ns-resize;
+}
+
+.referenceTransformBox .referenceScaleHandle.e,
+.referenceTransformBox .referenceScaleHandle.w {
+  cursor: ew-resize;
+}
+
+.referenceTransformBox .referenceScaleHandle.nw,
+.referenceTransformBox .referenceScaleHandle.se {
+  cursor: nwse-resize;
+}
+
+.referenceTransformBox .referenceScaleHandle.ne,
+.referenceTransformBox .referenceScaleHandle.sw {
+  cursor: nesw-resize;
+}
+
 .featureList {
   display: grid;
   gap: 8px;
+  align-content: start;
+}
+
+.featurePanel {
+  flex: 1 1 150px;
+  min-height: 96px;
+  overflow: hidden;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.featurePanel .featureList {
+  overflow: auto;
+  min-height: 0;
+}
+
+.exportRule {
+  order: 9;
+  flex: 0 0 auto;
+  max-height: 104px;
+  overflow: auto;
+}
+
+.exportRule p {
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .featureItem {

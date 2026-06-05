@@ -3,11 +3,16 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import {
   Box as BoxIcon,
+  ChevronDown,
+  ChevronUp,
   Circle,
   Download,
+  Eye,
+  EyeOff,
   FileImage,
   FileJson,
   Import as ImportIcon,
+  Layers,
   Map as MapIcon,
   MousePointer2,
   Orbit,
@@ -54,9 +59,17 @@ type ReferenceLayer = {
   id: string;
   name: string;
   dataUrl: string;
+  order: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
   opacity: number;
   visible: boolean;
   source: "file" | "url";
+  naturalWidth?: number;
+  naturalHeight?: number;
   createdAt: number;
 };
 
@@ -98,6 +111,16 @@ type ActiveTransform = {
   initialLocalPoints?: Point[];
 };
 
+type ActiveReferenceTransform = {
+  mode: TransformMode;
+  id: string;
+  startPoint: Point;
+  initialLayer: ReferenceLayer;
+  center: Point;
+  startAngle: number;
+  scaleHandle?: ScaleHandle;
+};
+
 const image = { width: 2709, height: 2320 };
 const worldScale = 0.18;
 const initialZoom = 0.38;
@@ -126,11 +149,16 @@ const viewShortcuts: Record<ViewMode, string> = {
 
 const iconNodes: Record<string, IconNode> = {
   "3d": BoxIcon,
+  "chevron-down": ChevronDown,
+  "chevron-up": ChevronUp,
   circle: Circle,
   download: Download,
+  eye: Eye,
+  "eye-off": EyeOff,
   "file-image": FileImage,
   "file-json": FileJson,
   import: ImportIcon,
+  layers: Layers,
   line: Slash,
   map: MapIcon,
   orbit: Orbit,
@@ -168,6 +196,7 @@ let showReference = localStorage.getItem(referenceShowKey) !== "false";
 let zoom = initialZoom;
 let pan = { x: 0, y: 0 };
 let referenceRenderKey = "";
+let referencePersistTimer: number | undefined;
 let terrainTexture: THREE.Texture | null = null;
 let placementPreset: PlacementPreset = "surface";
 let placementWidth = placementDefaults.surface.width;
@@ -177,8 +206,11 @@ let pointerPoint: Point | null = null;
 let activePan: PanState | null = null;
 let spacePanning = false;
 let freeTransformId = "";
+let focusedReferenceId = "";
 let lastSelectClick: { id: string; point: Point; time: number } | null = null;
 let activeTransform: ActiveTransform | null = null;
+let activeReferenceTransform: ActiveReferenceTransform | null = null;
+let draggedReferenceId = "";
 let undoStack: HistorySnapshot[] = [];
 let redoStack: HistorySnapshot[] = [];
 
@@ -311,10 +343,7 @@ app.innerHTML = `
         <div class="group">
           <label for="referenceUpload">Reference images</label>
           <input id="referenceUpload" type="file" accept="image/*" multiple />
-          <p class="hint">Saved in this browser for your QA; still omitted from schematic exports.</p>
-          <div id="referenceList" class="referenceList"></div>
-          <label for="referenceOpacity">Active layer opacity</label>
-          <input id="referenceOpacity" type="range" min="0" max="1" step="0.02" value="0.48" />
+          <p class="hint">Saved in this browser for QA; omitted from schematic exports.</p>
           <label class="toggle"><input id="showReference" type="checkbox" checked /> Show references</label>
         </div>
 
@@ -382,6 +411,7 @@ app.innerHTML = `
               <g id="referenceLayer"></g>
               <rect class="terrain" width="${image.width}" height="${image.height}" />
               <g id="featureLayer"></g>
+              <g id="referenceTransformLayer"></g>
               <g id="transformLayer"></g>
               <g id="draftLayer"></g>
             </g>
@@ -401,11 +431,52 @@ app.innerHTML = `
           <button id="seedNatanz">Add Natanz starter layout</button>
           <p class="hint">Approximate blocks for QA. Replace or adjust each feature against your evidence.</p>
         </div>
-        <div class="group">
+        <div class="group featurePanel">
           <label>Features</label>
           <div id="featureList" class="featureList"></div>
         </div>
-        <div class="group">
+        <div class="group layersPanel">
+          <div class="panelTitle">
+            <label>Layers</label>
+            <span data-icon="layers"></span>
+          </div>
+          <div class="layerToolbar">
+            <button id="referenceLayerUp" title="Move selected reference layer up"><span data-icon="chevron-up"></span></button>
+            <button id="referenceLayerDown" title="Move selected reference layer down"><span data-icon="chevron-down"></span></button>
+            <button id="fitReferenceLayer" title="Fit selected image inside canvas">Fit</button>
+            <button id="fillReferenceLayer" title="Fill canvas with selected image">Fill</button>
+          </div>
+          <div id="referenceList" class="referenceList"></div>
+          <div id="referenceInspector" class="referenceInspector">
+            <label for="referenceName">Layer name</label>
+            <input id="referenceName" placeholder="Reference image" />
+            <label for="referenceOpacity">Opacity</label>
+            <input id="referenceOpacity" type="range" min="0" max="1" step="0.02" value="0.48" />
+            <div class="twoCol">
+              <label for="referenceX">X</label>
+              <input id="referenceX" type="number" step="1" />
+              <label for="referenceY">Y</label>
+              <input id="referenceY" type="number" step="1" />
+              <label for="referenceWidth">Width</label>
+              <input id="referenceWidth" type="number" min="1" step="1" />
+              <label for="referenceHeight">Height</label>
+              <input id="referenceHeight" type="number" min="1" step="1" />
+            </div>
+            <label for="referenceRotation">Rotation</label>
+            <input id="referenceRotation" type="range" min="-180" max="180" step="1" />
+            <div class="nudgeGrid">
+              <button data-reference-nudge="0,-5">Up</button>
+              <button data-reference-nudge="-5,0">Left</button>
+              <button data-reference-nudge="5,0">Right</button>
+              <button data-reference-nudge="0,5">Down</button>
+              <button id="referenceRotateLeft">-15</button>
+              <button id="referenceRotateRight">+15</button>
+              <button id="resetReferenceLayer">Reset</button>
+              <button id="deleteReferenceLayer" class="danger"><span data-icon="trash"></span></button>
+            </div>
+          </div>
+        </div>
+        <div class="group exportRule">
           <label>Clean export rule</label>
           <p>Reference imagery is omitted from schematic SVG/PNG exports. 3D PNG export includes only the model, unless you deliberately load and show a texture.</p>
         </div>
@@ -419,6 +490,7 @@ const stage = document.querySelector<SVGSVGElement>("#stage")!;
 const viewport = document.querySelector<SVGGElement>("#viewport")!;
 const referenceLayer = document.querySelector<SVGGElement>("#referenceLayer")!;
 const featureLayer = document.querySelector<SVGGElement>("#featureLayer")!;
+const referenceTransformLayer = document.querySelector<SVGGElement>("#referenceTransformLayer")!;
 const transformLayer = document.querySelector<SVGGElement>("#transformLayer")!;
 const draftLayer = document.querySelector<SVGGElement>("#draftLayer")!;
 const modelStage = document.querySelector<HTMLDivElement>("#modelStage")!;
@@ -523,10 +595,10 @@ function bind() {
 
   document.querySelector<HTMLInputElement>("#referenceOpacity")!.addEventListener("input", (event) => {
     referenceOpacity = Number((event.target as HTMLInputElement).value);
-    const active = activeReferenceLayer();
+    const active = focusedReferenceLayer();
     if (active) {
       active.opacity = referenceOpacity;
-      void persistReferenceLayer(active);
+      schedulePersistReferenceLayer(active);
     }
     saveReferenceUiState();
     render();
@@ -540,6 +612,69 @@ function bind() {
 
   document.querySelector<HTMLInputElement>("#referenceUpload")!.addEventListener("change", (event) => {
     void loadReferenceImage(event);
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceName")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ name: (event.target as HTMLInputElement).value });
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceX")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ x: Number((event.target as HTMLInputElement).value) });
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceY")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ y: Number((event.target as HTMLInputElement).value) });
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceWidth")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ width: Number((event.target as HTMLInputElement).value) });
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceHeight")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ height: Number((event.target as HTMLInputElement).value) });
+  });
+
+  document.querySelector<HTMLInputElement>("#referenceRotation")!.addEventListener("input", (event) => {
+    void updateFocusedReferenceLayer({ rotation: normalizeDegrees(Number((event.target as HTMLInputElement).value)) });
+  });
+
+  document.querySelector("#referenceLayerUp")!.addEventListener("click", () => {
+    void moveReferenceLayerInStack(focusedReferenceId || activeReferenceId, -1);
+  });
+
+  document.querySelector("#referenceLayerDown")!.addEventListener("click", () => {
+    void moveReferenceLayerInStack(focusedReferenceId || activeReferenceId, 1);
+  });
+
+  document.querySelector("#fitReferenceLayer")!.addEventListener("click", () => {
+    void fitFocusedReferenceLayer("fit");
+  });
+
+  document.querySelector("#fillReferenceLayer")!.addEventListener("click", () => {
+    void fitFocusedReferenceLayer("fill");
+  });
+
+  document.querySelector("#resetReferenceLayer")!.addEventListener("click", () => {
+    void resetFocusedReferenceLayer();
+  });
+
+  document.querySelector("#deleteReferenceLayer")!.addEventListener("click", () => {
+    void deleteReferenceLayer(focusedReferenceId || activeReferenceId);
+  });
+
+  document.querySelector("#referenceRotateLeft")!.addEventListener("click", () => {
+    void rotateFocusedReferenceLayer(-15);
+  });
+
+  document.querySelector("#referenceRotateRight")!.addEventListener("click", () => {
+    void rotateFocusedReferenceLayer(15);
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-reference-nudge]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [dx, dy] = (button.dataset.referenceNudge ?? "0,0").split(",").map(Number);
+      void moveFocusedReferenceLayer(dx, dy);
+    });
   });
 
   document.querySelector<HTMLInputElement>("#zoom")!.addEventListener("input", (event) => {
@@ -620,7 +755,7 @@ function bind() {
   stage.addEventListener("pointerup", onPointerUp);
   stage.addEventListener("pointercancel", endPlanPan);
   stage.addEventListener("pointerleave", () => {
-    if (activePan || activeTransform) return;
+    if (activePan || activeTransform || activeReferenceTransform) return;
     pointerPoint = null;
     renderDraft();
   });
@@ -647,6 +782,7 @@ function setTool(nextTool: Tool) {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  activeReferenceTransform = null;
   clearPlanPanState();
   if (tool !== "select") freeTransformId = "";
   if (tool === "place") viewMode = "plan";
@@ -659,6 +795,7 @@ function setViewMode(nextViewMode: ViewMode) {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  activeReferenceTransform = null;
   clearPlanPanState();
   if (viewMode !== "plan") freeTransformId = "";
   render();
@@ -705,8 +842,10 @@ function cancelCurrentAction() {
   draft = [];
   pointerStart = null;
   activeTransform = null;
+  activeReferenceTransform = null;
   clearPlanPanState();
   freeTransformId = "";
+  focusedReferenceId = "";
   pointerPoint = null;
   setTool("select");
 }
@@ -817,7 +956,8 @@ function handleHotkeys(event: KeyboardEvent) {
 
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
-    deleteSelectedFeature();
+    if (selectedId) deleteSelectedFeature();
+    else if (focusedReferenceId) void deleteReferenceLayer(focusedReferenceId);
     return;
   }
 
@@ -831,7 +971,8 @@ function handleHotkeys(event: KeyboardEvent) {
     }[event.key];
     if (movement) {
       event.preventDefault();
-      moveSelected(movement.dx, movement.dy);
+      if (selectedFeature()) moveSelected(movement.dx, movement.dy);
+      else if (focusedReferenceId) void moveFocusedReferenceLayer(movement.dx, movement.dy);
     }
     return;
   }
@@ -912,6 +1053,7 @@ function duplicateSelectedFeature() {
   duplicate.points = duplicate.points.map((point) => ({ x: point.x + 36, y: point.y + 36 }));
   features.push(duplicate);
   selectedId = duplicate.id;
+  focusedReferenceId = "";
   saveState();
   render();
 }
@@ -938,6 +1080,7 @@ function openFreeTransform(featureId: string) {
   if (!feature || feature.points.length < 2) return;
   tool = "select";
   selectedId = feature.id;
+  focusedReferenceId = "";
   freeTransformId = feature.id;
   draft = [];
   pointerStart = null;
@@ -975,6 +1118,7 @@ function snapshotState(): HistorySnapshot {
 function restoreSnapshot(snapshot: HistorySnapshot) {
   features = snapshot.features.map(cloneFeature);
   selectedId = features.some((feature) => feature.id === snapshot.selectedId) ? snapshot.selectedId : features[0]?.id ?? "";
+  if (selectedId) focusedReferenceId = "";
   saveState();
   render();
 }
@@ -993,6 +1137,29 @@ function onPointerDown(event: PointerEvent) {
     return;
   }
   if (tool === "select") {
+    const referenceHandle = (event.target as Element).closest<SVGElement>("[data-reference-transform]");
+    if (referenceHandle && focusedReferenceId) {
+      const layer = referenceLayers.find((candidate) => candidate.id === focusedReferenceId);
+      if (!layer) return;
+      const center = referenceLayerCenter(layer);
+      activeReferenceTransform = {
+        mode: referenceHandle.dataset.referenceTransform === "rotate" ? "rotate" : referenceHandle.dataset.referenceTransform === "scale" ? "scale" : "move",
+        id: layer.id,
+        startPoint: point,
+        initialLayer: cloneReferenceLayer(layer),
+        center,
+        startAngle: angleBetween(center, point),
+        scaleHandle: referenceHandle.dataset.scaleHandle as ScaleHandle | undefined
+      };
+      try {
+        stage.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic and some browser-generated pointer events may not be capturable.
+      }
+      event.preventDefault();
+      return;
+    }
+
     const handle = (event.target as Element).closest<SVGElement>("[data-transform]");
     const feature = selectedFeature();
     if (handle && feature) {
@@ -1037,12 +1204,43 @@ function onPointerDown(event: PointerEvent) {
       event.preventDefault();
       return;
     }
+
+    const referenceNode = (event.target as Element).closest<SVGElement>("[data-reference-id]");
+    if (referenceNode) {
+      const layer = referenceLayers.find((candidate) => candidate.id === referenceNode.dataset.referenceId);
+      if (!layer) return;
+      activeReferenceId = layer.id;
+      focusedReferenceId = layer.id;
+      selectedId = "";
+      freeTransformId = "";
+      referenceOpacity = layer.opacity;
+      saveReferenceUiState();
+      setTerrainTexture(layer.dataUrl);
+      activeReferenceTransform = {
+        mode: "move",
+        id: layer.id,
+        startPoint: point,
+        initialLayer: cloneReferenceLayer(layer),
+        center: referenceLayerCenter(layer),
+        startAngle: 0
+      };
+      try {
+        stage.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic and some browser-generated pointer events may not be capturable.
+      }
+      render();
+      event.preventDefault();
+      return;
+    }
+
     const node = (event.target as Element).closest<SVGElement>("[data-id]");
     const nextSelectedId = node?.dataset.id ?? "";
     const isDoubleSelect = Boolean(nextSelectedId && lastSelectClick?.id === nextSelectedId && event.timeStamp - lastSelectClick.time < 1000 && distance(point, lastSelectClick.point) < 36 / zoom);
     lastSelectClick = nextSelectedId ? { id: nextSelectedId, point, time: event.timeStamp } : null;
     if (selectedId !== nextSelectedId) freeTransformId = "";
     selectedId = nextSelectedId;
+    focusedReferenceId = "";
     if (isDoubleSelect) {
       event.preventDefault();
       openFreeTransform(nextSelectedId);
@@ -1112,6 +1310,10 @@ function onPointerMove(event: PointerEvent) {
   }
   const point = svgPoint(event);
   pointerPoint = point;
+  if (activeReferenceTransform) {
+    updateActiveReferenceTransform(point);
+    return;
+  }
   if (activeTransform) {
     updateActiveTransform(point);
     return;
@@ -1128,6 +1330,21 @@ function onPointerMove(event: PointerEvent) {
 function onPointerUp(event: PointerEvent) {
   if (activePan) {
     endPlanPan(event);
+    return;
+  }
+  if (activeReferenceTransform) {
+    const layer = referenceLayers.find((candidate) => candidate.id === activeReferenceTransform?.id);
+    if (stage.hasPointerCapture(event.pointerId)) {
+      try {
+        stage.releasePointerCapture(event.pointerId);
+      } catch {
+        // Capture can already be gone after cancelled pointer gestures.
+      }
+    }
+    activeReferenceTransform = null;
+    cancelScheduledReferencePersist();
+    if (layer) void persistReferenceLayer(layer);
+    render();
     return;
   }
   if (activeTransform) {
@@ -1167,6 +1384,7 @@ function createFeature(points: Point[], featureKind: FeatureKind, label: string)
   };
   features.push(feature);
   selectedId = feature.id;
+  focusedReferenceId = "";
   saveState();
   render();
 }
@@ -1188,6 +1406,7 @@ function createPlacementFeature(center: Point) {
   };
   features.push(feature);
   selectedId = feature.id;
+  focusedReferenceId = "";
   kind = feature.kind;
   saveState();
   render();
@@ -1237,6 +1456,97 @@ function scaleActiveFeature(feature: Feature, point: Point) {
   }, activeTransform.center, activeTransform.initialRotation));
 }
 
+function updateActiveReferenceTransform(point: Point) {
+  if (!activeReferenceTransform) return;
+  const layer = referenceLayers.find((candidate) => candidate.id === activeReferenceTransform?.id);
+  if (!layer) return;
+  const initial = activeReferenceTransform.initialLayer;
+
+  if (activeReferenceTransform.mode === "move") {
+    layer.x = initial.x + point.x - activeReferenceTransform.startPoint.x;
+    layer.y = initial.y + point.y - activeReferenceTransform.startPoint.y;
+  } else if (activeReferenceTransform.mode === "rotate") {
+    const delta = angleBetween(activeReferenceTransform.center, point) - activeReferenceTransform.startAngle;
+    layer.rotation = normalizeDegrees(initial.rotation + radiansToDegrees(delta));
+  } else {
+    scaleActiveReferenceLayer(layer, point);
+  }
+
+  referenceRenderKey = "";
+  renderReferenceLayers();
+  renderReferenceTransform();
+  renderReferenceList();
+  renderReferenceInspector();
+  renderIcons();
+}
+
+function scaleActiveReferenceLayer(layer: ReferenceLayer, point: Point) {
+  if (!activeReferenceTransform?.scaleHandle) return;
+  const initial = activeReferenceTransform.initialLayer;
+  const handle = activeReferenceTransform.scaleHandle;
+  const pointerLocal = toLocalPoint(point, activeReferenceTransform.center, initial.rotation);
+  const affectsX = handle.includes("e") || handle.includes("w");
+  const affectsY = handle.includes("n") || handle.includes("s");
+  const halfWidth = Math.max(1, initial.width / 2);
+  const halfHeight = Math.max(1, initial.height / 2);
+  const scaleX = affectsX ? clamp(Math.abs(pointerLocal.x) / halfWidth, 0.02, 20) : 1;
+  const scaleY = affectsY ? clamp(Math.abs(pointerLocal.y) / halfHeight, 0.02, 20) : 1;
+  const nextWidth = Math.max(1, initial.width * scaleX);
+  const nextHeight = Math.max(1, initial.height * scaleY);
+  layer.width = nextWidth;
+  layer.height = nextHeight;
+  layer.x = activeReferenceTransform.center.x - nextWidth / 2;
+  layer.y = activeReferenceTransform.center.y - nextHeight / 2;
+}
+
+async function updateFocusedReferenceLayer(patch: Partial<ReferenceLayer>) {
+  const layer = focusedReferenceLayer();
+  if (!layer) return;
+  Object.assign(layer, patch);
+  layer.name = layer.name.trim() || "Reference image";
+  layer.width = Math.max(1, Number(layer.width) || image.width);
+  layer.height = Math.max(1, Number(layer.height) || image.height);
+  layer.x = Number.isFinite(layer.x) ? layer.x : 0;
+  layer.y = Number.isFinite(layer.y) ? layer.y : 0;
+  layer.rotation = normalizeDegrees(layer.rotation || 0);
+  layer.opacity = clamp(Number(layer.opacity), 0, 1);
+  referenceOpacity = layer.opacity;
+  saveReferenceUiState();
+  referenceRenderKey = "";
+  schedulePersistReferenceLayer(layer);
+  render();
+}
+
+async function moveFocusedReferenceLayer(dx: number, dy: number) {
+  const layer = focusedReferenceLayer();
+  if (!layer || (!dx && !dy)) return;
+  await updateFocusedReferenceLayer({ x: layer.x + dx, y: layer.y + dy });
+}
+
+async function rotateFocusedReferenceLayer(delta: number) {
+  const layer = focusedReferenceLayer();
+  if (!layer) return;
+  await updateFocusedReferenceLayer({ rotation: normalizeDegrees(layer.rotation + delta) });
+}
+
+async function fitFocusedReferenceLayer(mode: "fit" | "fill") {
+  const layer = focusedReferenceLayer();
+  if (!layer) return;
+  await updateFocusedReferenceLayer(fittedReferenceTransform(layer, mode));
+}
+
+async function resetFocusedReferenceLayer() {
+  const layer = focusedReferenceLayer();
+  if (!layer) return;
+  await updateFocusedReferenceLayer({
+    x: 0,
+    y: 0,
+    width: image.width,
+    height: image.height,
+    rotation: 0
+  });
+}
+
 function moveSelected(dx: number, dy: number) {
   if (!selectedId || (!dx && !dy)) return;
   pushHistory();
@@ -1279,10 +1589,12 @@ function render() {
   renderReferenceLayers();
   renderToolbar();
   renderFeatures();
+  renderReferenceTransform();
   renderTransform();
   renderDraft();
   renderList();
   renderReferenceList();
+  renderReferenceInspector();
   renderInspector();
   renderModel();
   renderIcons();
@@ -1313,20 +1625,24 @@ function renderIcons() {
 }
 
 function renderReferenceLayers() {
-  const key = `${showReference}:${referenceLayers.map((layer) => `${layer.id}:${layer.visible}:${layer.opacity}:${layer.dataUrl.length}`).join("|")}`;
+  const key = `${showReference}:${referenceLayers.map((layer) => `${layer.id}:${layer.order}:${layer.visible}:${layer.opacity}:${layer.x}:${layer.y}:${layer.width}:${layer.height}:${layer.rotation}:${layer.dataUrl.length}`).join("|")}`;
   if (key === referenceRenderKey) return;
   referenceRenderKey = key;
   referenceLayer.replaceChildren();
   if (!showReference) return;
-  for (const layer of referenceLayers) {
+  for (const layer of [...referenceLayers].reverse()) {
     if (!layer.visible) continue;
     const imageElement = document.createElementNS(svgNs, "image");
     imageElement.setAttribute("href", layer.dataUrl);
-    imageElement.setAttribute("width", String(image.width));
-    imageElement.setAttribute("height", String(image.height));
+    imageElement.setAttribute("x", String(layer.x));
+    imageElement.setAttribute("y", String(layer.y));
+    imageElement.setAttribute("width", String(layer.width));
+    imageElement.setAttribute("height", String(layer.height));
     imageElement.setAttribute("preserveAspectRatio", "none");
     imageElement.setAttribute("opacity", String(layer.opacity));
+    imageElement.setAttribute("transform", referenceLayerTransform(layer));
     imageElement.dataset.referenceId = layer.id;
+    imageElement.classList.add("referenceImage");
     referenceLayer.appendChild(imageElement);
   }
 }
@@ -1338,21 +1654,38 @@ function renderReferenceList() {
     return;
   }
   list.innerHTML = referenceLayers.map((layer) => `
-    <div class="referenceItem ${layer.id === activeReferenceId ? "active" : ""}">
-      <button data-reference-select="${layer.id}">
-        <span>${escapeHtml(layer.name)}</span>
-        <small>${layer.source} / ${new Date(layer.createdAt).toLocaleDateString()}</small>
+    <div class="referenceItem ${layer.id === focusedReferenceId ? "active" : ""} ${layer.visible ? "" : "muted"}" draggable="true" data-reference-row="${layer.id}">
+      <button class="layerIcon" data-reference-visible="${layer.id}" title="${layer.visible ? "Hide layer" : "Show layer"}">
+        <span data-icon="${layer.visible ? "eye" : "eye-off"}"></span>
       </button>
-      <label class="miniToggle"><input data-reference-visible="${layer.id}" type="checkbox" ${layer.visible ? "checked" : ""} /> visible</label>
-      <button data-reference-delete="${layer.id}" class="danger">Delete</button>
+      <button class="layerSelect" data-reference-select="${layer.id}">
+        <span>${escapeHtml(layer.name)}</span>
+        <small>${escapeHtml(layer.source)} / ${Math.round(layer.width)} x ${Math.round(layer.height)} / ${Math.round(layer.opacity * 100)}%</small>
+      </button>
+      <div class="layerActions">
+        <button data-reference-up="${layer.id}" title="Move up"><span data-icon="chevron-up"></span></button>
+        <button data-reference-down="${layer.id}" title="Move down"><span data-icon="chevron-down"></span></button>
+        <button data-reference-delete="${layer.id}" class="danger" title="Delete layer"><span data-icon="trash"></span></button>
+      </div>
     </div>
   `).join("");
   list.querySelectorAll<HTMLButtonElement>("[data-reference-select]").forEach((button) => {
     button.addEventListener("click", () => selectReferenceLayer(button.dataset.referenceSelect ?? ""));
   });
-  list.querySelectorAll<HTMLInputElement>("[data-reference-visible]").forEach((checkbox) => {
-    checkbox.addEventListener("change", () => {
-      void setReferenceLayerVisible(checkbox.dataset.referenceVisible ?? "", checkbox.checked);
+  list.querySelectorAll<HTMLButtonElement>("[data-reference-visible]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const layer = referenceLayers.find((candidate) => candidate.id === button.dataset.referenceVisible);
+      if (layer) void setReferenceLayerVisible(layer.id, !layer.visible);
+    });
+  });
+  list.querySelectorAll<HTMLButtonElement>("[data-reference-up]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void moveReferenceLayerInStack(button.dataset.referenceUp ?? "", -1);
+    });
+  });
+  list.querySelectorAll<HTMLButtonElement>("[data-reference-down]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void moveReferenceLayerInStack(button.dataset.referenceDown ?? "", 1);
     });
   });
   list.querySelectorAll<HTMLButtonElement>("[data-reference-delete]").forEach((button) => {
@@ -1360,6 +1693,95 @@ function renderReferenceList() {
       void deleteReferenceLayer(button.dataset.referenceDelete ?? "");
     });
   });
+  list.querySelectorAll<HTMLDivElement>("[data-reference-row]").forEach((row) => {
+    row.addEventListener("dragstart", () => {
+      draggedReferenceId = row.dataset.referenceRow ?? "";
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragend", () => {
+      draggedReferenceId = "";
+      row.classList.remove("dragging");
+      list.querySelectorAll(".dropTarget").forEach((target) => target.classList.remove("dropTarget"));
+    });
+    row.addEventListener("dragover", (event) => {
+      if (!draggedReferenceId || draggedReferenceId === row.dataset.referenceRow) return;
+      event.preventDefault();
+      row.classList.add("dropTarget");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("dropTarget"));
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      row.classList.remove("dropTarget");
+      void moveReferenceLayerBefore(draggedReferenceId, row.dataset.referenceRow ?? "");
+      draggedReferenceId = "";
+    });
+  });
+}
+
+function renderReferenceTransform() {
+  const layer = referenceLayers.find((candidate) => candidate.id === focusedReferenceId);
+  if (!layer || viewMode !== "plan" || tool !== "select") {
+    referenceTransformLayer.innerHTML = "";
+    return;
+  }
+  const controlScale = controlUnits();
+  const box = referenceLayerBox(layer);
+  const corners = ["nw", "ne", "se", "sw"].map((handle) => scaleHandleWorld(box, handle as ScaleHandle));
+  const center = referenceLayerCenter(layer);
+  const handleSize = 12 * controlScale;
+  const halfHandle = handleSize / 2;
+  const rotateDistance = Math.max(42 * controlScale, Math.min(layer.width, layer.height) * 0.24);
+  const rotateAngle = degreesToRadians(layer.rotation - 90);
+  const rotateHandle = { x: center.x + Math.cos(rotateAngle) * rotateDistance, y: center.y + Math.sin(rotateAngle) * rotateDistance };
+  referenceTransformLayer.innerHTML = `
+    <g class="referenceTransformBox">
+      <path d="${pathData(corners, true)}" />
+      <line x1="${center.x}" y1="${center.y}" x2="${rotateHandle.x}" y2="${rotateHandle.y}" />
+      <circle data-reference-transform="move" cx="${center.x}" cy="${center.y}" r="${7 * controlScale}" />
+      <circle data-reference-transform="rotate" class="rotateHandle" cx="${rotateHandle.x}" cy="${rotateHandle.y}" r="${9 * controlScale}" />
+      ${scaleHandles.map((handle) => {
+        const point = scaleHandleWorld(box, handle);
+        return `<rect data-reference-transform="scale" data-scale-handle="${handle}" class="referenceScaleHandle ${handle}" x="${point.x - halfHandle}" y="${point.y - halfHandle}" width="${handleSize}" height="${handleSize}" transform="rotate(${box.rotation} ${point.x} ${point.y})" />`;
+      }).join("")}
+    </g>
+  `;
+}
+
+function renderReferenceInspector() {
+  const layer = referenceLayers.find((candidate) => candidate.id === (focusedReferenceId || activeReferenceId));
+  document.querySelector<HTMLDivElement>("#referenceInspector")!.classList.toggle("empty", !layer);
+  const inputs = [
+    "#referenceName",
+    "#referenceOpacity",
+    "#referenceX",
+    "#referenceY",
+    "#referenceWidth",
+    "#referenceHeight",
+    "#referenceRotation"
+  ].map((selector) => document.querySelector<HTMLInputElement>(selector)!);
+  inputs.forEach((input) => {
+    input.disabled = !layer;
+  });
+  document.querySelectorAll<HTMLButtonElement>("#referenceLayerUp, #referenceLayerDown, #fitReferenceLayer, #fillReferenceLayer, #resetReferenceLayer, #deleteReferenceLayer, #referenceRotateLeft, #referenceRotateRight, [data-reference-nudge]").forEach((button) => {
+    button.disabled = !layer;
+  });
+  if (!layer) {
+    document.querySelector<HTMLInputElement>("#referenceName")!.value = "";
+    document.querySelector<HTMLInputElement>("#referenceOpacity")!.value = String(referenceOpacity);
+    document.querySelector<HTMLInputElement>("#referenceX")!.value = "";
+    document.querySelector<HTMLInputElement>("#referenceY")!.value = "";
+    document.querySelector<HTMLInputElement>("#referenceWidth")!.value = "";
+    document.querySelector<HTMLInputElement>("#referenceHeight")!.value = "";
+    document.querySelector<HTMLInputElement>("#referenceRotation")!.value = "0";
+    return;
+  }
+  document.querySelector<HTMLInputElement>("#referenceName")!.value = layer.name;
+  document.querySelector<HTMLInputElement>("#referenceOpacity")!.value = String(layer.opacity);
+  document.querySelector<HTMLInputElement>("#referenceX")!.value = String(Math.round(layer.x));
+  document.querySelector<HTMLInputElement>("#referenceY")!.value = String(Math.round(layer.y));
+  document.querySelector<HTMLInputElement>("#referenceWidth")!.value = String(Math.round(layer.width));
+  document.querySelector<HTMLInputElement>("#referenceHeight")!.value = String(Math.round(layer.height));
+  document.querySelector<HTMLInputElement>("#referenceRotation")!.value = String(layer.rotation);
 }
 
 function renderFeatures() {
@@ -1426,6 +1848,7 @@ function renderList() {
   list.querySelectorAll<HTMLButtonElement>("[data-feature]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedId = button.dataset.feature ?? "";
+      focusedReferenceId = "";
       render();
     });
   });
@@ -1598,6 +2021,7 @@ function importJson(event: Event) {
     features = (parsed.features ?? []).map(normalizeFeature);
     imagerySource = normalizeImagerySource(parsed.imagerySource ?? imagerySource);
     selectedId = features[0]?.id ?? "";
+    focusedReferenceId = "";
     saveState();
     saveImagerySource();
     render();
@@ -1611,7 +2035,8 @@ async function loadReferenceImage(event: Event) {
   if (!files.length) return;
   for (const file of files) {
     const dataUrl = await readFileAsDataUrl(file);
-    await addReferenceLayer(file.name, dataUrl, "file");
+    const dimensions = await imageDimensions(dataUrl);
+    await addReferenceLayer(file.name, dataUrl, "file", dimensions);
   }
   input.value = "";
 }
@@ -1622,7 +2047,11 @@ function loadImageryUrl() {
   loader.setCrossOrigin("anonymous");
   loader.load(imagerySource.url, (texture) => {
     setTexture(texture);
-    void addReferenceLayer(imagerySource.credit || "URL reference", imagerySource.url, "url");
+    const sourceImage = texture.image as HTMLImageElement | ImageBitmap | undefined;
+    void addReferenceLayer(imagerySource.credit || "URL reference", imagerySource.url, "url", {
+      width: sourceImage?.width,
+      height: sourceImage?.height
+    });
   });
 }
 
@@ -1685,6 +2114,7 @@ async function initializeReferenceLayers() {
     referenceLayers = await loadReferenceLayers();
     if (activeReferenceId && !referenceLayers.some((layer) => layer.id === activeReferenceId)) activeReferenceId = "";
     if (!activeReferenceId) activeReferenceId = referenceLayers[0]?.id ?? "";
+    focusedReferenceId = activeReferenceId;
     referenceOpacity = activeReferenceLayer()?.opacity ?? referenceOpacity;
     saveReferenceUiState();
     applyActiveReferenceTexture();
@@ -1694,18 +2124,30 @@ async function initializeReferenceLayers() {
   }
 }
 
-async function addReferenceLayer(name: string, dataUrl: string, source: ReferenceLayer["source"]) {
+async function addReferenceLayer(name: string, dataUrl: string, source: ReferenceLayer["source"], dimensions?: Partial<{ width: number; height: number }>) {
+  const fitted = fittedReferenceTransform({
+    naturalWidth: dimensions?.width,
+    naturalHeight: dimensions?.height,
+    width: dimensions?.width ?? image.width,
+    height: dimensions?.height ?? image.height
+  }, "fit");
   const layer = normalizeReferenceLayer({
     id: crypto.randomUUID(),
     name,
     dataUrl,
+    order: nextReferenceTopOrder(),
+    ...fitted,
     opacity: referenceOpacity,
     visible: true,
     source,
+    naturalWidth: dimensions?.width,
+    naturalHeight: dimensions?.height,
     createdAt: Date.now()
   });
   referenceLayers = [layer, ...referenceLayers];
   activeReferenceId = layer.id;
+  focusedReferenceId = layer.id;
+  selectedId = "";
   showReference = true;
   saveReferenceUiState();
   await persistReferenceLayer(layer);
@@ -1717,6 +2159,9 @@ function selectReferenceLayer(id: string) {
   const layer = referenceLayers.find((candidate) => candidate.id === id);
   if (!layer) return;
   activeReferenceId = layer.id;
+  focusedReferenceId = layer.id;
+  selectedId = "";
+  freeTransformId = "";
   referenceOpacity = layer.opacity;
   saveReferenceUiState();
   setTerrainTexture(layer.dataUrl);
@@ -1726,6 +2171,7 @@ function selectReferenceLayer(id: string) {
 async function setReferenceLayerVisible(id: string, visible: boolean) {
   const layer = referenceLayers.find((candidate) => candidate.id === id);
   if (!layer) return;
+  cancelScheduledReferencePersist();
   layer.visible = visible;
   await persistReferenceLayer(layer);
   if (layer.id === activeReferenceId && visible) setTerrainTexture(layer.dataUrl);
@@ -1734,17 +2180,59 @@ async function setReferenceLayerVisible(id: string, visible: boolean) {
 
 async function deleteReferenceLayer(id: string) {
   if (!id) return;
+  cancelScheduledReferencePersist();
   referenceLayers = referenceLayers.filter((layer) => layer.id !== id);
   await removeReferenceLayer(id);
   if (activeReferenceId === id) activeReferenceId = referenceLayers[0]?.id ?? "";
+  if (focusedReferenceId === id) focusedReferenceId = activeReferenceId;
   referenceOpacity = activeReferenceLayer()?.opacity ?? referenceOpacity;
   saveReferenceUiState();
   applyActiveReferenceTexture();
   render();
 }
 
+async function moveReferenceLayerInStack(id: string, direction: -1 | 1) {
+  if (!id) return;
+  const index = referenceLayers.findIndex((layer) => layer.id === id);
+  const nextIndex = index + direction;
+  if (index < 0 || nextIndex < 0 || nextIndex >= referenceLayers.length) return;
+  cancelScheduledReferencePersist();
+  [referenceLayers[index], referenceLayers[nextIndex]] = [referenceLayers[nextIndex], referenceLayers[index]];
+  reindexReferenceLayers();
+  await persistReferenceLayers(referenceLayers);
+  referenceRenderKey = "";
+  render();
+}
+
+async function moveReferenceLayerBefore(dragId: string, targetId: string) {
+  if (!dragId || !targetId || dragId === targetId) return;
+  const dragged = referenceLayers.find((layer) => layer.id === dragId);
+  if (!dragged) return;
+  cancelScheduledReferencePersist();
+  referenceLayers = referenceLayers.filter((layer) => layer.id !== dragId);
+  const targetIndex = referenceLayers.findIndex((layer) => layer.id === targetId);
+  referenceLayers.splice(Math.max(0, targetIndex), 0, dragged);
+  reindexReferenceLayers();
+  focusedReferenceId = dragged.id;
+  activeReferenceId = dragged.id;
+  referenceOpacity = dragged.opacity;
+  saveReferenceUiState();
+  await persistReferenceLayers(referenceLayers);
+  referenceRenderKey = "";
+  render();
+}
+
 function activeReferenceLayer() {
   return referenceLayers.find((layer) => layer.id === activeReferenceId);
+}
+
+function focusedReferenceLayer() {
+  const layer = referenceLayers.find((candidate) => candidate.id === focusedReferenceId || candidate.id === activeReferenceId);
+  if (layer) {
+    focusedReferenceId = layer.id;
+    activeReferenceId = layer.id;
+  }
+  return layer;
 }
 
 function applyActiveReferenceTexture() {
@@ -1762,12 +2250,36 @@ function saveReferenceUiState() {
   localStorage.setItem(referenceOpacityKey, String(referenceOpacity));
 }
 
+function schedulePersistReferenceLayer(layer: ReferenceLayer) {
+  if (referencePersistTimer) window.clearTimeout(referencePersistTimer);
+  const snapshot = cloneReferenceLayer(layer);
+  referencePersistTimer = window.setTimeout(() => {
+    void persistReferenceLayer(snapshot);
+    referencePersistTimer = undefined;
+  }, 180);
+}
+
+function cancelScheduledReferencePersist() {
+  if (!referencePersistTimer) return;
+  window.clearTimeout(referencePersistTimer);
+  referencePersistTimer = undefined;
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
+  });
+}
+
+function imageDimensions(src: string): Promise<{ width: number; height: number } | undefined> {
+  return new Promise((resolve) => {
+    const probe = new Image();
+    probe.onload = () => resolve({ width: probe.naturalWidth || probe.width, height: probe.naturalHeight || probe.height });
+    probe.onerror = () => resolve(undefined);
+    probe.src = src;
   });
 }
 
@@ -1873,6 +2385,60 @@ function cloneFeature(feature: Feature): Feature {
     ...feature,
     points: clonePoints(feature.points)
   };
+}
+
+function cloneReferenceLayer(layer: ReferenceLayer): ReferenceLayer {
+  return { ...layer };
+}
+
+function referenceLayerCenter(layer: ReferenceLayer): Point {
+  return {
+    x: layer.x + layer.width / 2,
+    y: layer.y + layer.height / 2
+  };
+}
+
+function referenceLayerBox(layer: ReferenceLayer): OrientedBox {
+  return {
+    center: referenceLayerCenter(layer),
+    rotation: layer.rotation,
+    minX: -layer.width / 2,
+    maxX: layer.width / 2,
+    minY: -layer.height / 2,
+    maxY: layer.height / 2
+  };
+}
+
+function referenceLayerTransform(layer: ReferenceLayer) {
+  const center = referenceLayerCenter(layer);
+  return `rotate(${layer.rotation} ${center.x} ${center.y})`;
+}
+
+function fittedReferenceTransform(layer: Partial<ReferenceLayer>, mode: "fit" | "fill") {
+  const naturalWidth = Math.max(1, layer.naturalWidth ?? layer.width ?? image.width);
+  const naturalHeight = Math.max(1, layer.naturalHeight ?? layer.height ?? image.height);
+  const scale = mode === "fit"
+    ? Math.min(image.width / naturalWidth, image.height / naturalHeight)
+    : Math.max(image.width / naturalWidth, image.height / naturalHeight);
+  const width = naturalWidth * scale;
+  const height = naturalHeight * scale;
+  return {
+    x: (image.width - width) / 2,
+    y: (image.height - height) / 2,
+    width,
+    height,
+    rotation: 0
+  };
+}
+
+function reindexReferenceLayers() {
+  referenceLayers.forEach((layer, index) => {
+    layer.order = index;
+  });
+}
+
+function nextReferenceTopOrder() {
+  return referenceLayers.length ? Math.min(...referenceLayers.map((layer) => layer.order)) - 1 : 0;
 }
 
 function clonePoints(points: Point[]) {
@@ -1987,6 +2553,7 @@ function seedNatanzLayout() {
   ];
   features = starters.map((feature) => ({ ...feature, id: crypto.randomUUID() }));
   selectedId = features[0]?.id ?? "";
+  focusedReferenceId = "";
   saveState();
   render();
 }
@@ -2131,13 +2698,23 @@ function normalizeImagerySource(raw: Partial<ImagerySource>): ImagerySource {
 }
 
 function normalizeReferenceLayer(raw: Partial<ReferenceLayer>): ReferenceLayer {
+  const naturalWidth = raw.naturalWidth ?? raw.width ?? image.width;
+  const naturalHeight = raw.naturalHeight ?? raw.height ?? image.height;
   return {
     id: raw.id ?? crypto.randomUUID(),
     name: raw.name?.trim() || "Reference image",
     dataUrl: raw.dataUrl ?? "",
+    order: Number.isFinite(raw.order) ? raw.order! : -(raw.createdAt ?? Date.now()),
+    x: Number.isFinite(raw.x) ? raw.x! : 0,
+    y: Number.isFinite(raw.y) ? raw.y! : 0,
+    width: Math.max(1, raw.width ?? image.width),
+    height: Math.max(1, raw.height ?? image.height),
+    rotation: normalizeDegrees(raw.rotation ?? 0),
     opacity: clamp(raw.opacity ?? referenceOpacity, 0, 1),
     visible: raw.visible ?? true,
     source: raw.source ?? "file",
+    naturalWidth,
+    naturalHeight,
     createdAt: raw.createdAt ?? Date.now()
   };
 }
@@ -2176,7 +2753,7 @@ async function loadReferenceLayers() {
     const transaction = db.transaction(referenceDbStore, "readonly");
     const request = transaction.objectStore(referenceDbStore).getAll();
     const layers = await idbRequest<ReferenceLayer[]>(request);
-    return layers.map(normalizeReferenceLayer).sort((a, b) => b.createdAt - a.createdAt);
+    return layers.map(normalizeReferenceLayer).sort((a, b) => a.order - b.order);
   } finally {
     db.close();
   }
@@ -2187,6 +2764,18 @@ async function persistReferenceLayer(layer: ReferenceLayer) {
   try {
     const transaction = db.transaction(referenceDbStore, "readwrite");
     transaction.objectStore(referenceDbStore).put(layer);
+    await transactionComplete(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+async function persistReferenceLayers(layers: ReferenceLayer[]) {
+  const db = await openReferenceDb();
+  try {
+    const transaction = db.transaction(referenceDbStore, "readwrite");
+    const store = transaction.objectStore(referenceDbStore);
+    layers.forEach((layer) => store.put(layer));
     await transactionComplete(transaction);
   } finally {
     db.close();
