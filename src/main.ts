@@ -32,6 +32,7 @@ type FeatureKind = "surface" | "underground" | "road" | "fence" | "entrance" | "
 type Certainty = "confirmed" | "inferred" | "speculative";
 type Tool = "select" | "place" | "rect" | "ellipse" | "line" | "polygon" | "label";
 type ViewMode = "plan" | "model";
+type LabelMode = "all" | "selected" | "hidden";
 type PlacementPreset = "surface" | "underground" | "entrance";
 
 type Point = { x: number; y: number };
@@ -139,6 +140,7 @@ const referenceDbStore = "layers";
 const referenceActiveKey = "undergroundmaps:activeReferenceLayer";
 const referenceShowKey = "undergroundmaps:showReferences";
 const referenceOpacityKey = "undergroundmaps:referenceOpacity";
+const labelModeKey = "undergroundmaps:labelMode";
 
 const toolShortcuts: Record<Tool, string> = {
   select: "V",
@@ -230,6 +232,7 @@ let tool: Tool = "select";
 let kind: FeatureKind = "surface";
 let certainty: Certainty = "inferred";
 let viewMode: ViewMode = "plan";
+let labelMode: LabelMode = normalizeLabelMode(localStorage.getItem(labelModeKey));
 let features: Feature[] = loadState();
 let imagerySource: ImagerySource = loadImagerySource();
 let selectedId = features[0]?.id ?? "";
@@ -298,6 +301,12 @@ app.innerHTML = `
               <kbd>${viewShortcuts.model}</kbd>
             </button>
           </div>
+          <label for="labelMode">Labels</label>
+          <select id="labelMode">
+            <option value="all">Show all labels</option>
+            <option value="selected">Selected only</option>
+            <option value="hidden">Hide labels for QA</option>
+          </select>
         </div>
 
         <div class="group">
@@ -591,6 +600,12 @@ function bind() {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
     if (!button) return;
     setViewMode(button.dataset.view as ViewMode);
+  });
+
+  document.querySelector<HTMLSelectElement>("#labelMode")!.addEventListener("change", (event) => {
+    labelMode = normalizeLabelMode((event.target as HTMLSelectElement).value);
+    localStorage.setItem(labelModeKey, labelMode);
+    render();
   });
 
   document.querySelector("#toolButtons")!.addEventListener("click", (event) => {
@@ -2018,6 +2033,7 @@ function renderInspector() {
   document.querySelector<HTMLInputElement>("#placementRotation")!.value = String(placementRotation);
   document.querySelector<HTMLInputElement>("#zoom")!.value = String(zoom);
   document.querySelector<HTMLInputElement>("#referenceOpacity")!.value = String(activeReferenceLayer()?.opacity ?? referenceOpacity);
+  document.querySelector<HTMLSelectElement>("#labelMode")!.value = labelMode;
   document.querySelector<HTMLInputElement>("#showReference")!.checked = showReference;
   document.querySelector<HTMLInputElement>("#imageryUrl")!.value = imagerySource.url;
   document.querySelector<HTMLInputElement>("#imageryCredit")!.value = imagerySource.credit;
@@ -2117,21 +2133,28 @@ function makeEntranceFeature(feature: Feature) {
 function featureSvg(feature: Feature, clean: boolean) {
   const selected = feature.id === selectedId && !clean ? " selected" : "";
   const classes = `feature ${feature.kind} ${feature.certainty}${selected}`;
+  const showLabel = clean || shouldShowFeatureLabel(feature);
   if (feature.kind === "label") {
     const point = feature.points[0];
-    return `<text class="${classes}" data-id="${feature.id}" x="${point.x}" y="${point.y}">${escapeHtml(feature.label)}</text>`;
+    return showLabel ? `<text class="${classes}" data-id="${feature.id}" x="${point.x}" y="${point.y}">${escapeHtml(feature.label)}</text>` : "";
   }
   if (feature.kind === "entrance") {
     const point = feature.points[0];
     return `<g class="${classes}" data-id="${feature.id}">
       <circle cx="${point.x}" cy="${point.y}" r="22" />
-      <text x="${point.x + 34}" y="${point.y + 8}">${escapeHtml(feature.label)}</text>
+      ${showLabel ? `<text x="${point.x + 34}" y="${point.y + 8}">${escapeHtml(feature.label)}</text>` : ""}
     </g>`;
   }
   return `<g class="${classes}" data-id="${feature.id}">
     <path d="${pathData(feature.points, feature.kind !== "road" && feature.kind !== "fence")}" />
-    ${feature.label ? labelAt(feature) : ""}
+    ${feature.label && showLabel ? labelAt(feature) : ""}
   </g>`;
+}
+
+function shouldShowFeatureLabel(feature: Feature) {
+  if (labelMode === "hidden") return false;
+  if (labelMode === "selected") return feature.id === selectedId;
+  return true;
 }
 
 function labelAt(feature: Feature) {
@@ -2941,6 +2964,10 @@ function defaultLabel(featureKind: FeatureKind) {
     entrance: "Entrance",
     label: "Label"
   }[featureKind];
+}
+
+function normalizeLabelMode(value: string | null): LabelMode {
+  return value === "selected" || value === "hidden" ? value : "all";
 }
 
 function escapeHtml(value: string) {
