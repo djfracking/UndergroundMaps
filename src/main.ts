@@ -34,6 +34,7 @@ type Tool = "select" | "place" | "rect" | "ellipse" | "line" | "polygon" | "labe
 type ViewMode = "plan" | "model";
 type LabelMode = "all" | "selected" | "hidden";
 type PlacementPreset = "surface" | "underground" | "entrance";
+type ReferenceResizeAxis = "width" | "height" | "both";
 
 type Point = { x: number; y: number };
 
@@ -400,6 +401,26 @@ app.innerHTML = `
           <input id="referenceUpload" type="file" accept="image/*" multiple />
           <p class="hint">Saved in this browser for QA; omitted from schematic exports.</p>
           <label class="toggle"><input id="showReference" type="checkbox" checked /> Show references</label>
+          <div class="quickReferenceControls">
+            <label>Active reference size</label>
+            <div class="nudgeGrid">
+              <button data-reference-resize="width,1.12">Wider</button>
+              <button data-reference-resize="width,0.88">Narrower</button>
+              <button data-reference-resize="height,1.12">Taller</button>
+              <button data-reference-resize="height,0.88">Shorter</button>
+              <button id="quickFitReference">Fit</button>
+              <button id="quickFillReference">Fill</button>
+              <button id="quickResetReference">Reset</button>
+              <button data-reference-resize="both,1.12">Scale up</button>
+            </div>
+            <label>Active reference move</label>
+            <div class="nudgeGrid">
+              <button data-reference-nudge="0,-50">Up</button>
+              <button data-reference-nudge="-50,0">Left</button>
+              <button data-reference-nudge="50,0">Right</button>
+              <button data-reference-nudge="0,50">Down</button>
+            </div>
+          </div>
         </div>
 
         <div class="group">
@@ -746,6 +767,25 @@ function bind() {
       const [dx, dy] = (button.dataset.referenceNudge ?? "0,0").split(",").map(Number);
       void moveFocusedReferenceLayer(dx, dy);
     });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-reference-resize]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const [axis, factor] = (button.dataset.referenceResize ?? "").split(",");
+      void resizeFocusedReferenceLayer(axis as ReferenceResizeAxis, Number(factor));
+    });
+  });
+
+  document.querySelector("#quickFitReference")!.addEventListener("click", () => {
+    void fitFocusedReferenceLayer("fit");
+  });
+
+  document.querySelector("#quickFillReference")!.addEventListener("click", () => {
+    void fitFocusedReferenceLayer("fill");
+  });
+
+  document.querySelector("#quickResetReference")!.addEventListener("click", () => {
+    void resetFocusedReferenceLayer();
   });
 
   document.querySelector<HTMLInputElement>("#zoom")!.addEventListener("input", (event) => {
@@ -1386,7 +1426,7 @@ function onPointerMove(event: PointerEvent) {
     updatePlanPan(event);
     return;
   }
-  const point = svgPoint(event);
+  const point = svgPoint(event, Boolean(activeReferenceTransform));
   pointerPoint = point;
   if (activeReferenceTransform) {
     updateActiveReferenceTransform(point);
@@ -1599,6 +1639,20 @@ async function moveFocusedReferenceLayer(dx: number, dy: number) {
   const layer = focusedReferenceLayer();
   if (!layer || (!dx && !dy)) return;
   await updateFocusedReferenceLayer({ x: layer.x + dx, y: layer.y + dy });
+}
+
+async function resizeFocusedReferenceLayer(axis: ReferenceResizeAxis, factor: number) {
+  const layer = focusedReferenceLayer();
+  if (!layer || !Number.isFinite(factor) || factor <= 0) return;
+  const center = referenceLayerCenter(layer);
+  const nextWidth = axis === "height" ? layer.width : Math.max(1, layer.width * factor);
+  const nextHeight = axis === "width" ? layer.height : Math.max(1, layer.height * factor);
+  await updateFocusedReferenceLayer({
+    width: nextWidth,
+    height: nextHeight,
+    x: center.x - nextWidth / 2,
+    y: center.y - nextHeight / 2
+  });
 }
 
 async function rotateFocusedReferenceLayer(delta: number) {
@@ -1909,7 +1963,7 @@ function renderReferenceInspector() {
   inputs.forEach((input) => {
     input.disabled = !layer;
   });
-  document.querySelectorAll<HTMLButtonElement>("#referenceLayerUp, #referenceLayerDown, #fitReferenceLayer, #fillReferenceLayer, #resetReferenceLayer, #deleteReferenceLayer, #referenceRotateLeft, #referenceRotateRight, [data-reference-nudge]").forEach((button) => {
+  document.querySelectorAll<HTMLButtonElement>("#referenceLayerUp, #referenceLayerDown, #fitReferenceLayer, #fillReferenceLayer, #quickFitReference, #quickFillReference, #quickResetReference, #resetReferenceLayer, #deleteReferenceLayer, #referenceRotateLeft, #referenceRotateRight, [data-reference-nudge], [data-reference-resize]").forEach((button) => {
     button.disabled = !layer;
   });
   if (!layer) {
@@ -2899,12 +2953,13 @@ function controlUnits() {
   return 1 / Math.abs(matrix.a);
 }
 
-function svgPoint(event: PointerEvent): Point {
+function svgPoint(event: PointerEvent, allowOutsideImage = false): Point {
   const point = stage.createSVGPoint();
   point.x = event.clientX;
   point.y = event.clientY;
   const matrix = viewport.getScreenCTM()?.inverse();
   const mapped = matrix ? point.matrixTransform(matrix) : point;
+  if (allowOutsideImage) return { x: mapped.x, y: mapped.y };
   return { x: clamp(mapped.x, 0, image.width), y: clamp(mapped.y, 0, image.height) };
 }
 

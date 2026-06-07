@@ -218,6 +218,12 @@ button.active kbd {
   min-width: 0;
 }
 
+.quickReferenceControls {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .depthPresets {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
